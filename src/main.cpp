@@ -20,6 +20,11 @@ int phase = 0;
 #define CH_G 1
 #define CH_B 2
 
+#define CH 0
+
+#define BUZZER 05
+
+int melody[] = {262, 294, 330, 349, 392, 440, 494, 523}; // до ре ми фа соль ля 
 
 void setColor(int r, int g, int b) {
   ledcWrite(CH_R, r);
@@ -84,6 +89,20 @@ void lesson3()
   setColor(0, 0, 0);       // выключить
   delay(700);
 }
+void lesson4()
+{
+    digitalWrite(BUZZER, HIGH); delay(200);
+    digitalWrite(BUZZER, LOW);  delay(800);
+}
+void lesson5()
+{
+   for (int i = 0; i < 8; i++) {
+    ledcWriteTone(CH, melody[i]);
+    delay(300);
+  }
+  ledcWriteTone(CH, 0); // тишина
+  delay(1500);
+}
 
 void setup() {
   pinMode(LED_RED, OUTPUT);
@@ -100,11 +119,18 @@ void setup() {
   ledcAttachPin(PIN_R, CH_R);
   ledcAttachPin(PIN_G, CH_G);
   ledcAttachPin(PIN_B, CH_B);
+
+  pinMode(BUZZER, OUTPUT);
+
+    ledcSetup(CH, 2000, 8);
+  ledcAttachPin(BUZZER, CH);
 }
 
 void loop() {
 
   lesson2();
   lesson3();
+  //lesson4();
+  lesson5();
 }
 
