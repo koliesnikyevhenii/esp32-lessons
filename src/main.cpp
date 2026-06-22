@@ -24,6 +24,11 @@ int phase = 0;
 
 #define BUZZER 05
 
+#define BUTTON 04
+
+int lastReading = HIGH;
+unsigned long lastChange = 0;
+
 int melody[] = {262, 294, 330, 349, 392, 440, 494, 523}; // до ре ми фа соль ля 
 
 void setColor(int r, int g, int b) {
@@ -104,6 +109,18 @@ void lesson5()
   delay(1500);
 }
 
+void lesson6()
+{
+  int reading = digitalRead(BUTTON);
+  if (reading != lastReading && millis() - lastChange > 50) { // антидребезг 50 мс
+    lastChange = millis();
+    if (reading == LOW) {
+      Serial.println("Кнопка нажата");
+    }
+    lastReading = reading;
+  }
+}
+
 void setup() {
   pinMode(LED_RED, OUTPUT);
   pinMode(LED_YELLOW, OUTPUT);
@@ -122,15 +139,17 @@ void setup() {
 
   pinMode(BUZZER, OUTPUT);
 
-    ledcSetup(CH, 2000, 8);
+  ledcSetup(CH, 2000, 8);
   ledcAttachPin(BUZZER, CH);
+
+Serial.begin(115200);
+  pinMode(BUTTON, INPUT_PULLUP); // не нажата = HIGH, нажата = LOW
 }
 
 void loop() {
-
-  lesson2();
-  lesson3();
-  //lesson4();
+lesson2();
+lesson3();  
   lesson5();
+  lesson6();
 }
 
