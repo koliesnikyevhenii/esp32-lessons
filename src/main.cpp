@@ -3,6 +3,7 @@
 #define LED_RED 23
 #define LED_YELLOW 18
 #define LED_GREEN 19
+#define LED_RED2 02
 
 // Track the time of the last event
 unsigned long previousMillis = 0; 
@@ -28,6 +29,7 @@ int phase = 0;
 
 int lastReading = HIGH;
 unsigned long lastChange = 0;
+bool ledOn = false;
 
 int melody[] = {262, 294, 330, 349, 392, 440, 494, 523}; // до ре ми фа соль ля 
 
@@ -108,7 +110,6 @@ void lesson5()
   ledcWriteTone(CH, 0); // тишина
   delay(1500);
 }
-
 void lesson6()
 {
   int reading = digitalRead(BUTTON);
@@ -120,7 +121,16 @@ void lesson6()
     lastReading = reading;
   }
 }
-
+void lesson7()
+{
+   int reading = digitalRead(BUTTON);
+  if (reading == LOW && lastReading == HIGH && millis() - lastChange > 10) {
+    ledOn = !ledOn;                              // переключаем состояние
+    digitalWrite(LED_RED2, ledOn ? HIGH : LOW);
+    lastChange = millis();
+  }
+  lastReading = reading;
+}
 void setup() {
   pinMode(LED_RED, OUTPUT);
   pinMode(LED_YELLOW, OUTPUT);
@@ -142,14 +152,17 @@ void setup() {
   ledcSetup(CH, 2000, 8);
   ledcAttachPin(BUZZER, CH);
 
+    pinMode(LED_RED2, OUTPUT);
+
 Serial.begin(115200);
   pinMode(BUTTON, INPUT_PULLUP); // не нажата = HIGH, нажата = LOW
 }
 
 void loop() {
-lesson2();
-lesson3();  
-  lesson5();
-  lesson6();
+// lesson2();
+// lesson3();  
+//   lesson5();
+//   lesson6();
+lesson7();
 }
 
