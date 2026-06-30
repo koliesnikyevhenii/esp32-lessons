@@ -23,3 +23,8 @@
 
 #define BUZZER 5
 #define BUTTON 4       // INPUT_PULLUP: idle = HIGH, pressed = LOW
+
+// Analog sensors (ADC1, доступен при активном Wi-Fi)
+#define POT     34     // потенциометр: средний вывод -> GPIO34
+#define LDR     35     // модуль фоторезистора: A0 -> GPIO35
+#define DHT_PIN 16     // DHT11 DATA -> GPIO16
