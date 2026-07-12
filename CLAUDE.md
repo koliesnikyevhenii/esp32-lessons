@@ -4,16 +4,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A PlatformIO project of incremental ESP32 learning exercises (Arduino framework). Each lesson is a **self-contained sketch** in `src/lessons/lessonNN_name.cpp` with its own `setup()` and `loop()`. Only one lesson is compiled per build, selected by a PlatformIO env (see below) — this avoids the duplicate `setup()`/`loop()` and global-variable collisions you'd get if they all compiled together. The shared pin/channel map lives in `include/pins.h`.
+A PlatformIO project of incremental ESP32 learning exercises (Arduino framework). Each lesson is a **self-contained sketch** in `src/lessons-basic/lessonNN_name.cpp` with its own `setup()` and `loop()`. Only one lesson is compiled per build, selected by a PlatformIO env (see below) — this avoids the duplicate `setup()`/`loop()` and global-variable collisions you'd get if they all compiled together. The shared pin/channel map lives in `include/pins.h`.
 
 Target board: `esp32dev`. Serial monitor baud: `115200`. Code comments are in Russian; pin/lesson labels and identifiers are English.
 
 ## Layout
 
 ```
-include/pins.h            # shared pin + LEDC channel #defines (the single source of truth for wiring)
-src/lessons/lessonNN_*.cpp # one standalone sketch per lesson
-platformio.ini            # one [env:lessonNN_*] per lesson, each with build_src_filter
+include/pins.h                   # shared pin + LEDC channel #defines (the single source of truth for wiring)
+src/lessons-basic/lessonNN_*.cpp # one standalone sketch per lesson
+src/lessons-basic/documentation/ # per-lesson notes/docs
+src/lessons-advance/             # advanced lessons (currently empty)
+platformio.ini                   # one [env:lessonNN_*] per lesson, each with build_src_filter
 ```
 
 ## Commands
@@ -31,11 +33,11 @@ pio run                                # builds default_envs (set in platformio.
 
 ## Adding a lesson
 
-1. Create `src/lessons/lessonNN_name.cpp` with its own `#include "pins.h"`, `setup()`, and `loop()`. Add any new pins to `include/pins.h` rather than redefining them locally.
+1. Create `src/lessons-basic/lessonNN_name.cpp` with its own `#include "pins.h"`, `setup()`, and `loop()`. Add any new pins to `include/pins.h` rather than redefining them locally.
 2. Add a matching env to `platformio.ini`:
    ```ini
    [env:lessonNN_name]
-   build_src_filter = +<lessons/lessonNN_name.cpp>
+   build_src_filter = +<lessons-basic/lessonNN_name.cpp>
    ```
    The `[env]` base section already supplies platform/board/framework/baud.
 
