@@ -28,3 +28,8 @@
 #define POT     34     // потенциометр: средний вывод -> GPIO34
 #define LDR     35     // модуль фоторезистора: A0 -> GPIO35
 #define DHT_PIN 16     // DHT11 DATA -> GPIO16
+
+// I2C (урок 20, MPU6050). Шина ESP32 переназначаемая — берём свободные пины,
+// чтобы не пересекаться с RGB (21/22) и остальной периферией из этого файла.
+#define MPU_SDA 32     // MPU6050 SDA -> GPIO32
+#define MPU_SCL 33     // MPU6050 SCL -> GPIO33

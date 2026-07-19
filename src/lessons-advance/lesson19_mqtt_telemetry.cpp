@@ -27,7 +27,7 @@ const char* PASS = "uteam2020";
 // ---- MQTT-брокер (RabbitMQ + mqtt-плагин) ---------------------------------
 // ВАЖНО: укажи LAN-IP компьютера, на котором поднят docker compose (не localhost!
 // ESP32 — отдельное устройство в сети). Порт 1883 проброшен в docker-compose.yml.
-const char* MQTT_BROKER = "192.168.0.100";   // <-- заменить на IP своего ПК
+const char* MQTT_BROKER = "192.168.0.3";   // <-- заменить на IP своего ПК
 const uint16_t MQTT_PORT = 1883;
 
 // Пользователь RabbitMQ. Учётка guest работает ТОЛЬКО с localhost, поэтому
