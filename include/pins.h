@@ -32,14 +32,14 @@
 // I2C (урок 20, MPU6050). Шина ESP32 переназначаемая — берём свободные пины,
 // чтобы не пересекаться с RGB (21/22) и остальной периферией из этого файла.
 #define MPU_SDA 32     // MPU6050 SDA -> GPIO32
-#define MPU_SCL 33     // MPU6050 SCL -> GPIO33
+#define MPU_SCL 17     // MPU6050 SCL -> GPIO17
 
 // TB6612FNG — драйвер двух моторов (урок 21). A = левый мотор, B = правый.
 // STBY драйвера заведён на 3V3 (всегда включён), поэтому GPIO под него не нужен.
 // Взяты свободные пины, не пересекающиеся с периферией выше в этом файле.
-#define MOTOR_AIN1 13  // мотор A, направление 1
-#define MOTOR_AIN2 14  // мотор A, направление 2
-#define MOTOR_PWMA 25  // мотор A, скорость (ШИМ)
-#define MOTOR_BIN1 26  // мотор B, направление 1
-#define MOTOR_BIN2 27  // мотор B, направление 2
-#define MOTOR_PWMB 17  // мотор B, скорость (ШИМ)
+#define MOTOR_AIN1 13  // мотор A, направление 1 orange
+#define MOTOR_AIN2 14  // мотор A, направление 2 yellow
+#define MOTOR_PWMA 25  // мотор A, скорость (ШИМ) green
+#define MOTOR_BIN1 26  // мотор B, направление 1 brown
+#define MOTOR_BIN2 27  // мотор B, направление 2 violet
+#define MOTOR_PWMB 33  // мотор B, скорость (ШИМ) white
