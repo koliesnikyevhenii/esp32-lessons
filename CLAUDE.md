@@ -13,7 +13,7 @@ Target board: `esp32dev`. Serial monitor baud: `115200`. Code comments are in Ru
 ```
 include/pins.h                     # shared pin + LEDC channel #defines (the single source of truth for wiring)
 src/lessons-basic/lessonNN_*.cpp   # standalone basic sketches (lessons 02–18)
-src/lessons-advance/lessonNN_*.cpp # advanced IoT/robot sketches (lessons 19–21, + lesson_check_mpu)
+src/lessons-advance/lessonNN_*.cpp # advanced IoT/robot sketches (lessons 19–22, + lesson_check_* diagnostics)
 src/documentation/                 # notes/docs (ESP32 guide, driver install)
 platformio.ini                     # one [env:lessonNN_*] per lesson, each with build_src_filter
 ```
@@ -62,7 +62,15 @@ There is no test suite or linter despite the empty `test/` dir.
   **TB6612FNG** (`forward`/`back`/`left`/`right`/`stop`; tank-style turns). Speed via
   `analogWrite` (no LEDC channels here). Has a **failsafe**: stops the motors if no command
   arrives for `FAILSAFE_MS` (700 ms), so the browser resends every ~300 ms while a key/button
-  is held.
+  is held. `lesson_check_tb6612` / `lesson_check_tb6612_forward` are no-network diagnostics.
+- **lesson22_robot_telemetry** — lessons 20 + 21 in **one** sketch: the same `PubSubClient`
+  both publishes `pitch`/`roll`/`yaw` and subscribes to `commands/esp32/drive`, so the IMU and
+  the motor driver are wired **at the same time** (their pins must not overlap — see below).
+  Beyond merging: `mpu.update()` runs every `loop()` (publish stays at 5 Hz) for a less drifty
+  integrated `yaw`; a **tilt guard** stops the motors and ignores drive commands while
+  |pitch| or |roll| exceeds `TILT_LIMIT` 45° (released below `TILT_RELEASE` 35° — hysteresis),
+  and reports itself as an ordinary metric `sensors/esp32/guard` (0/1) published **only on
+  change**. Keep `loop()` non-blocking: a `delay` there delays incoming `stop` commands.
 
 **Topic contracts (must match the .NET side):** telemetry `sensors/<device>/<metric>`,
 commands `commands/<device>/drive`. `<device>` is `esp32`. Before flashing, set `SSID`/`PASS`,
@@ -77,15 +85,18 @@ All hardware wiring lives as `#define`s in `include/pins.h` — check there befo
 - RGB LED on `PIN_R/G/B` (22/21/15), driven via PWM. `setColor(r,g,b)` writes to LEDC **channels** `CH_R/CH_G/CH_B` (0/1/2), not pins.
 - `BUZZER 05` shares LEDC channel `CH 0` with the RGB red channel — both demos aren't meant to run simultaneously.
 - `BUTTON 04` uses `INPUT_PULLUP`: not-pressed = HIGH, pressed = LOW. Button lessons debounce manually via `millis()`.
-- `MPU_SDA 32` / `MPU_SCL 33` — I2C bus for the MPU6050/6500 (lesson 20).
-- **TB6612FNG motors (lesson 21):** `MOTOR_AIN1 13`, `MOTOR_AIN2 14`, `MOTOR_PWMA 25` (motor A = left);
-  `MOTOR_BIN1 26`, `MOTOR_BIN2 27`, `MOTOR_PWMB 17` (motor B = right). The driver's `STBY` is wired
+- `MPU_SDA 32` / `MPU_SCL 17` — I2C bus for the MPU6050/6500 (lessons 20, 22).
+- **TB6612FNG motors (lessons 21, 22):** `MOTOR_AIN1 13`, `MOTOR_AIN2 14`, `MOTOR_PWMA 25` (motor A = left);
+  `MOTOR_BIN1 26`, `MOTOR_BIN2 27`, `MOTOR_PWMB 33` (motor B = right). (`MPU_SCL` and `MOTOR_PWMB`
+  were once swapped — 17 for PWM, 33 for SCL; `pins.h` is the truth, not older notes.) The driver's `STBY` is wired
   to `3V3` (always enabled), so no GPIO is reserved for it. `IN1=1,IN2=0`→forward; `IN1=0,IN2=1`→back;
   `IN1=IN2`→stop. If a motor spins the wrong way, swap its two output leads (or the `dir` signs).
 
 Because only one lesson compiles at a time (`build_src_filter`), the same GPIO can legitimately
 appear under different names across unrelated lessons — but keep new advanced-lesson pins distinct
-from the peripherals above to avoid confusion when several are wired at once.
+from the peripherals above to avoid confusion when several are wired at once. **Lesson 22 makes this
+a hard requirement, not a nicety:** it drives the motors and reads the IMU in the same sketch, so the
+`MPU_*` and `MOTOR_*` groups must stay disjoint.
 
 ## LEDC PWM API note (important)
 
