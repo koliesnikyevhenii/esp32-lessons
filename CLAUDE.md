@@ -7,8 +7,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 A PlatformIO project of incremental ESP32 learning exercises (Arduino framework). Each lesson is a **self-contained sketch** in `src/lessons-basic/lessonNN_name.cpp` with its own `setup()` and `loop()`. Only one lesson is compiled per build, selected by a PlatformIO env (see below) — this avoids the duplicate `setup()`/`loop()` and global-variable collisions you'd get if they all compiled together. The shared pin/channel map lives in `include/pins.h`.
 
 Default board: `esp32dev` (ESP32-WROOM-32 DevKit) — **except the camera lessons 23–26**, which
-are a different physical board and override `board = esp32cam` in their env (see below). Serial
-monitor baud: `115200`. Code comments are in Russian; pin/lesson labels and identifiers are English.
+run on an ESP32-**S3**-CAM and override the board (and PSRAM/USB settings) via `extends = cam_s3`
+in their env (see below). Serial monitor baud: `115200`. Code comments are in Russian; pin/lesson labels and identifiers are English.
 
 ## Layout
 
@@ -46,7 +46,8 @@ pio run                                # builds default_envs (set in platformio.
    build_src_filter = +<lessons-basic/lessonNN_name.cpp>
    ```
    The `[env]` base section already supplies platform/board/framework/baud. A lesson that runs
-   on a **different board** (the camera lessons) overrides just that one key: `board = esp32cam`.
+   on a **different board** (the camera lessons) pulls its overrides from a plain section instead:
+   `extends = cam_s3`.
 
 There is no test suite or linter despite the empty `test/` dir.
 
@@ -81,23 +82,39 @@ commands `commands/<device>/drive`. `<device>` is `esp32` for the robot and `esp
 camera's own telemetry (lesson 26). Before flashing, set `SSID`/`PASS`, `MQTT_BROKER` (the PC's
 LAN IP, **not** localhost), and use a non-`guest` RabbitMQ user (`guest` only works from localhost).
 
-## Camera lessons — ESP32-CAM (Этап 6)
+## Camera lessons — ESP32-S3-CAM (Этап 6)
 
-Lessons 23–26 + `lesson_check_cam` run on an **AI-Thinker ESP32-CAM**, not the DevKit. This is
-the single most important thing to keep in mind when touching them:
+Lessons 23–26 + `lesson_check_cam` run on a **HW-679 ESP32-S3-CAM** (ESP32-S3-WROOM-1-N16R8:
+16 MB flash, 8 MB **octal** PSRAM, OV2640, USB-C) — a different board **and a different chip**
+from the DevKit. This is the single most important thing to keep in mind when touching them:
 
-- their envs set `board = esp32cam`, which also brings `-DBOARD_HAS_PSRAM
-  -mfix-esp32-psram-cache-issue` and `partitions = huge_app.csv` (the camera firmware does not
-  fit the default partition table);
+- their envs `extends = cam_s3`, a plain section in `platformio.ini` holding
+  `board = esp32-s3-devkitc-1`, `board_build.arduino.memory_type = qio_opi`,
+  `partitions = default_16MB.csv`, `flash_size = 16MB` and
+  `-DBOARD_HAS_PSRAM -DARDUINO_USB_MODE=1 -DARDUINO_USB_CDC_ON_BOOT=1`. `extends` **does**
+  override the `board` from `[env]` (verified);
+- **`memory_type` is the fragile bit:** `qio_opi` for octal PSRAM (N16R8 / N8R8), `qio_qspi` for
+  quad (N8R2). Wrong value → `psramFound()` is false → QVGA only. `lesson_check_cam` prints the
+  PSRAM size in KB precisely so this is a one-run check;
+- USB-C on S3 is the chip's **native** USB, so `Serial` is USB-CDC (`CDC_ON_BOOT=1`), the port
+  re-enumerates after every flash, and each camera `setup()` starts with `delay(1500)` or the
+  first lines are lost. If a board turns out to have a CH340/CP2102 bridge instead, flip
+  `CDC_ON_BOOT` to 0 — `pio device list` VID/PID tells which (303A:1001 = native);
 - `esp_camera.h` ships **inside** the arduino-esp32 core — no `lib_deps` for it (verified on core
-  2.0.17). Only lesson 26 needs a library (`PubSubClient`);
+  2.0.17 / platform 7.0.1). Only lesson 26 needs a library (`PubSubClient`);
 - the `CAM_*` pins in `pins.h` are **not chosen by us** — the OV2640 ribbon is hard-wired on the
-  module, which is why some numbers collide with DevKit names (`CAM_Y4 19` vs `LED_GREEN 19`).
-  Different boards, different firmware: not a conflict;
+  module. `pins.h` carries a `CAM_MODEL_*` switch (`ESP32S3_CAM` default, `XIAO_ESP32S3`,
+  `AI_THINKER`); numbers colliding with DevKit names (`CAM_Y7 18` vs `LED_YELLOW 18`) are not a
+  conflict — different boards, different firmware;
+- `CAM_FLASH_LED` / `CAM_STATUS_LED` default to **−1** because S3 boards don't standardise them;
+  every LED call in the sketches sits behind `#if CAM_FLASH_LED >= 0` in local `flashInit()` /
+  `flashSet()` / `statusLed()` helpers. `lesson_check_cam` has a **"LED hunt"** that pulses the
+  safe free GPIOs one by one so the pin can be found by eye. Keep the guards when editing;
 - the camera occupies `LEDC_CHANNEL_0` + `LEDC_TIMER_0` for XCLK, so the flash LED uses
   `CH_CAM_FLASH 7` (channel→timer is `ch/2` in core 2.x). **Never** put anything on channel 0/1
-  in a camera sketch;
-- hardware, flashing (no USB, GPIO0→GND), power and failure modes:
+  in a camera sketch — and prefer explicit `ledcSetup` over `analogWrite` there, since
+  `analogWrite` picks channels on its own;
+- hardware, flashing (native USB, no GPIO0 jumper), power and failure modes:
   `src/lessons-advance/documentation/esp32cam_hardware.md`.
 
 - **lesson_check_cam** — no Wi-Fi diagnostic: PSRAM, `esp_camera_init`, sensor PID, one frame per
@@ -116,6 +133,8 @@ the single most important thing to keep in mind when touching them:
 - **lesson26_fpv_robot** — FPV: stream + on-page D-pad. The camera **does not drive motors**; it
   republishes button presses into `commands/esp32/drive`, which lesson 22 already consumes, so the
   robot firmware, the backend and the dashboard need **no changes**. Two boards, one broker.
+  (On S3 there *are* enough free GPIOs for a one-board robot — the doc's "variant B" maps them —
+  but that means re-wiring lesson 22's motors and IMU, so it stays a documented alternative.)
   It also publishes `sensors/esp32cam/fps|rssi` and subscribes to `sensors/esp32/guard`.
   `/drive` runs in the httpd task and `PubSubClient` is **not** thread-safe, so the handler only
   `xQueueSend`s and `loop()` publishes — keep that split if you touch this file.
@@ -135,11 +154,12 @@ All hardware wiring lives as `#define`s in `include/pins.h` — check there befo
   to `3V3` (always enabled), so no GPIO is reserved for it. `IN1=1,IN2=0`→forward; `IN1=0,IN2=1`→back;
   `IN1=IN2`→stop. If a motor spins the wrong way, swap its two output leads (or the `dir` signs).
 
-- **ESP32-CAM (lessons 23–26) — a different board:** the `CAM_*` block at the bottom of `pins.h`
-  (PWDN 32, XCLK 0, SIOD/SIOC 26/27, D0–D7 on 5/18/19/21/36/39/34/35, VSYNC/HREF/PCLK 25/23/22),
-  plus `CAM_FLASH_LED 4` (very bright, shares SD DATA1), `CAM_STATUS_LED 33` (**inverted**: LOW =
-  on) and `CH_CAM_FLASH 7`. Free GPIOs there: 12/13/14/15 (SD), 2, 4; `GPIO 0` is boot **and**
-  XCLK — never repurpose it.
+- **ESP32-S3-CAM (lessons 23–26) — a different board and chip:** the `CAM_*` block at the bottom
+  of `pins.h`, selected by `CAM_MODEL_*`. For the default HW-679: XCLK 15, SIOD/SIOC 4/5,
+  D0–D7 on 11/9/8/10/12/18/17/16, VSYNC/HREF/PCLK 6/7/13, PWDN/RESET −1, plus `CH_CAM_FLASH 7`
+  and `CAM_FLASH_LED`/`CAM_STATUS_LED` at −1 (see the camera section above). Free there: 1, 2, 3,
+  14, 21, 47, 48 and 38/39/40 (microSD). **Never** take 19/20 (native USB), 43/44 (UART0),
+  0/45/46 (strapping) or 26–37 (flash + PSRAM).
 
 Because only one lesson compiles at a time (`build_src_filter`), the same GPIO can legitimately
 appear under different names across unrelated lessons — but keep new advanced-lesson pins distinct
