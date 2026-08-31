@@ -106,6 +106,30 @@ from the DevKit. This is the single most important thing to keep in mind when to
   variable instead of a sensor register. `lesson_check_cam` tries JPEG, falls back to RGB565 and
   prints which mode it got — if a board turns out to carry an OV2640, `PIXFORMAT_JPEG` +
   `fb->buf` can go back and will be much faster;
+- **because of RGB565, `framesize` is fixed at `esp_camera_init()` and is NOT settable at
+  runtime.** `cam_config()` derives `width`/`height` and allocates the frame buffers once from
+  `cfg.frame_size`; `sensor_t::set_framesize()` belongs to the *sensor* driver and only writes
+  SCCB registers — there is no re-allocating wrapper (`nm` on `libesp32-camera.a` shows
+  `cam_config` as the only frame-geometry symbol, and it is called from init alone). In JPEG mode
+  the mismatch is survivable, since each JPEG carries its own dimensions; with RGB565 it is not —
+  `frame2jpg()` reads the stale `fb->width/height` while the sensor already emits rows of a
+  different length, and the frame breaks into **diagonal stripes with a black remainder** (the
+  symptom: "everything except the init framesize is broken"). Lessons 24/25 therefore switch
+  resolution by **`esp_camera_deinit()` + `initCamera(fs)`** in `applyFramesize()`, serialised
+  against the stream task by a `camLock` mutex (the stream holds it only around
+  `fb_get`→`frame2jpg`→`fb_return`, not during the network write), and choose `fb_count` by area
+  in `fbCountFor()`: 2 up to SVGA, 1 above — UXGA RGB565 is 3.7 MB per buffer, so two of them
+  will not fit in 8 MB beside Wi-Fi and `frame2jpg`'s output. Never "init small, `set_framesize`
+  big" here, and never init at the max and scale down either — both directions break RGB565;
+- **`xclk_freq_hz` must drop to 10 MHz at XGA and above** — `cfg.xclk_freq_hz = (fs >=
+  FRAMESIZE_XGA) ? 10000000 : 20000000` in lessons 24/25. At 20 MHz the camera bus outruns the
+  DMA path into PSRAM on big frames: `cam_hal` spams **`EV-EOF-OVF`** and `esp_camera_fb_get()`
+  returns NULL *forever* — the camera is dead until the next re-init, and the OVF interrupt storm
+  starves Wi-Fi too (the board drops off the network). Measured on this board: UXGA at 20 MHz =
+  OVF storm, zero frames; at 10 MHz = 0.5 fps and a clean image. SXGA is actually *faster* at
+  10 MHz (0.7 vs 0.4 fps), so this is not purely a workaround. Full measured ladder (RGB565 +
+  `frame2jpg`, quality 80): QVGA **10.2** fps | VGA **2.9** | SVGA **1.6** | XGA **0.9** |
+  SXGA **0.7** | UXGA **0.5**. Every framesize up to UXGA works; the ceiling is CPU, not Wi-Fi;
 - **`memory_type` is the fragile bit:** `qio_opi` for octal PSRAM (N16R8 / N8R8), `qio_qspi` for
   quad (N8R2). Wrong value → `psramFound()` is false → QVGA only. `lesson_check_cam` prints the
   PSRAM size in KB precisely so this is a one-run check;
@@ -147,12 +171,17 @@ from the DevKit. This is the single most important thing to keep in mind when to
   a stream handler never returns and would block the sync `WebServer`'s `loop()` forever. **Two
   servers:** page on `:80`, stream on `:81` — and the second one needs a distinct `ctrl_port`
   (32769) or `httpd_start` fails. Uses `CAMERA_GRAB_LATEST` so the video does not lag.
+  `:80/size?v=N` re-inits the camera rather than calling `set_framesize` — see the RGB565
+  framesize bullet above.
 - **lesson25_cam_controls** — the whole `sensor_t` control surface (`framesize`, `quality`,
   brightness/contrast/saturation, `special_effect`, mirror/flip, awb/aec/agc, bpc/wpc/lenc,
   `colorbar`) behind `/control?var=&val=` + `/status`. The point of the lesson: `set_*` writes
   sensor registers over SCCB, it is not a filter in our firmware. **`quality` is the exception**
   — it feeds `frame2jpg`, so it is the one slider that costs CPU and moves the fps; several
-  other `set_*` calls return `unsupported` on GC2145, which is expected.
+  other `set_*` calls return `unsupported` on GC2145, which is expected. **`framesize` is the
+  other exception:** `applyControl` intercepts it *before* touching `sensor_t` and re-inits the
+  camera (see the RGB565 framesize bullet above), so it is the one control that is not an SCCB
+  register write at all.
 - **lesson26_fpv_robot** — FPV: stream + on-page D-pad. The camera **does not drive motors**; it
   republishes button presses into `commands/esp32/drive`, which lesson 22 already consumes, so the
   robot firmware, the backend and the dashboard need **no changes**. Two boards, one broker.

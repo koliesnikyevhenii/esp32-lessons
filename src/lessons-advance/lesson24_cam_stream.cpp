@@ -21,12 +21,16 @@
 //    - цена разрешения: сравни к/с на QVGA / VGA / SVGA. На нашей плате стоит
 //      сенсор GC2145 без аппаратного JPEG, поэтому кадр жмёт процессор
 //      (frame2jpg, как в уроке 23) — упрёмся мы именно в сжатие, а не в Wi-Fi;
-//    - CAMERA_GRAB_LATEST — отдавать самый свежий кадр, чтобы видео не отставало.
+//    - CAMERA_GRAB_LATEST — отдавать самый свежий кадр, чтобы видео не отставало;
+//    - ПОЧЕМУ разрешение меняется переинициализацией камеры: буферы кадра
+//      выделяются один раз, в esp_camera_init(), под cfg.frame_size, а
+//      set_framesize() правит только регистры сенсора. На RGB565 это видно
+//      сразу — кадр не лезет в старый буфер и распадается на полосы.
 //
 //  Эндпоинты:
 //    :80/            HTML: <img> со стримом, к/с, выбор разрешения, вспышка
 //    :80/stats       JSON: {"fps":..,"kbps":..,"clients":..,"rssi":..,"heap":..}
-//    :80/size?v=N    разрешение (5=QVGA, 8=VGA, 9=SVGA, 13=UXGA)
+//    :80/size?v=N    разрешение (5=QVGA, 8=VGA, 9=SVGA, 13=UXGA) — с переинициализацией
 //    :80/flash?v=0..255  вспышка
 //    :81/stream      сам MJPEG-поток
 //
@@ -70,6 +74,26 @@ volatile float    streamFps   = 0;    // кадров в секунду
 volatile float    streamKbps  = 0;    // килобит в секунду
 volatile int      streamClients = 0;  // сколько стримов открыто прямо сейчас
 
+// ---- Разрешение: почему его нельзя менять "на ходу" ------------------------
+// Драйвер esp32-camera считает геометрию кадра ОДИН раз — в esp_camera_init():
+// cam_config() запоминает width/height и выделяет буферы ровно под этот размер.
+// А sensor_t::set_framesize() — функция драйвера СЕНСОРА: она пишет регистры
+// GC2145 и про буферы не знает ничего. В режиме JPEG это ещё сходило бы с рук
+// (JPEG самодостаточен, размер лежит внутри кадра), но у нас RGB565: frame2jpg()
+// читает fb->width/height, которые остались прежними, а сенсор уже гонит строки
+// другой длины. Результат — ровно те самые полосы и чёрный низ кадра.
+// Поэтому разрешение меняем ПЕРЕИНИЦИАЛИЗАЦИЕЙ камеры: deinit + init.
+static framesize_t       camSize = FRAMESIZE_QVGA;   // что стоит прямо сейчас
+static SemaphoreHandle_t camLock = NULL;             // у камеры один хозяин за раз
+
+// RGB565 — 2 байта на пиксель, и буфер выделяется целиком:
+//   QVGA 150 КБ | VGA 600 КБ | SVGA 938 КБ | XGA 1,5 МБ | UXGA 3,7 МБ.
+// Два UXGA-буфера (7,3 МБ) в 8 МБ PSRAM вместе с Wi-Fi и выходным буфером
+// frame2jpg уже не живут, поэтому на больших кадрах берём одинарную буферизацию.
+static size_t fbCountFor(framesize_t fs) {
+  return (fs <= FRAMESIZE_SVGA) ? 2 : 1;
+}
+
 // ---------------------------------------------------------------------------
 //  Подсветка и индикатор (на S3-платах пины не стандартизованы -> в pins.h -1).
 // ---------------------------------------------------------------------------
@@ -101,7 +125,7 @@ void statusLed(bool on) {
 // ---------------------------------------------------------------------------
 //  Инициализация камеры. Отличие от урока 23 — grab_mode.
 // ---------------------------------------------------------------------------
-bool initCamera() {
+bool initCamera(framesize_t fs) {
   camera_config_t cfg = {};
 
   cfg.pin_pwdn     = CAM_PWDN;
@@ -115,21 +139,29 @@ bool initCamera() {
   cfg.pin_href  = CAM_HREF;
   cfg.pin_pclk  = CAM_PCLK;
 
-  cfg.xclk_freq_hz = 20000000;
+  // XCLK зависит от размера кадра, и это не тонкая настройка, а условие работы.
+  // На больших кадрах шина камеры не успевает: DMA не вывозит поток пикселей в
+  // PSRAM, cam_hal начинает сыпать "EV-EOF-OVF", а fb_get() возвращает NULL —
+  // камера встаёт насмерть до следующей переинициализации. Замерено на этой
+  // плате: UXGA на 20 МГц = штурм OVF и ни одного кадра, на 10 МГц = 0,5 к/с и
+  // нормальная картинка. SXGA на 10 МГц выходит даже быстрее (0,7 против 0,4),
+  // так что это не только лекарство от OVF.
+  cfg.xclk_freq_hz = (fs >= FRAMESIZE_XGA) ? 10000000 : 20000000;
   cfg.ledc_timer   = LEDC_TIMER_0;
   cfg.ledc_channel = LEDC_CHANNEL_0;
 
   cfg.pixel_format = PIXFORMAT_RGB565;   // сырой кадр: сжимать будем сами
   cfg.jpeg_quality = 12;                 // при RGB565 не используется
 
+  // Сжатие делает процессор, и его цена растёт с площадью кадра: стартуем
+  // с QVGA, а кнопки на странице переинициализируют камеру на больший кадр,
+  // чтобы можно было сравнить к/с.
   if (psramFound()) {
-    // На OV2640 здесь стояла бы VGA. У нас сжатие делает процессор, а его цена
-    // растёт с площадью кадра — на VGA выходит 1-2 к/с. Стартуем с QVGA,
-    // разрешение можно поднять кнопкой на странице и сравнить к/с.
-    cfg.frame_size  = FRAMESIZE_QVGA;
-    cfg.fb_count    = 2;
+    cfg.frame_size  = fs;
+    cfg.fb_count    = fbCountFor(fs);
     cfg.fb_location = CAMERA_FB_IN_PSRAM;
   } else {
+    // Без PSRAM больше QVGA положить просто некуда: внутренней DRAM ~300 КБ.
     cfg.frame_size  = FRAMESIZE_QVGA;
     cfg.fb_count    = 1;
     cfg.fb_location = CAMERA_FB_IN_DRAM;
@@ -145,8 +177,31 @@ bool initCamera() {
     Serial.printf("[CAM] init FAILED: 0x%x (%s)\n", err, esp_err_to_name(err));
     return false;
   }
+  camSize = cfg.frame_size;   // запомнили: applyFramesize() сверяется с этим
+  Serial.printf("[CAM] кадр #%d, буферов %u\n", (int)camSize, (unsigned)cfg.fb_count);
   return true;
 }
+// ---------------------------------------------------------------------------
+//  Смена разрешения = deinit + init (почему — см. комментарий у camSize).
+//  Вызывают её обработчики на :80, а кадры в это время тянет задача стрима
+//  на :81 — поэтому оба берут camLock: без него стрим успел бы получить fb
+//  от уже уничтоженного драйвера.
+// ---------------------------------------------------------------------------
+static bool applyFramesize(framesize_t fs) {
+  if (!psramFound() && fs > FRAMESIZE_QVGA) return false;   // в DRAM больше не влезет
+  if (fs == camSize) return true;
+
+  xSemaphoreTake(camLock, portMAX_DELAY);
+  esp_camera_deinit();
+  bool ok = initCamera(fs);
+  if (!ok) {                                  // не поднялось — откатываемся
+    Serial.println("[CAM] не удалось, откат на QVGA");
+    ok = initCamera(FRAMESIZE_QVGA);
+  }
+  xSemaphoreGive(camLock);
+  return ok;
+}
+
 
 // ---------------------------------------------------------------------------
 //  СТРАНИЦА. Стрим лежит на другом порту, поэтому адрес собираем в браузере из
@@ -227,15 +282,20 @@ static esp_err_t streamHandler(httpd_req_t* req) {
   uint32_t windowBytes  = 0;
 
   while (true) {
+    // Кадр берём под camLock: пока мы держим fb, никто не имеет права сделать
+    // deinit камеры из обработчика /size. Замок отпускаем ДО отправки в сеть —
+    // сеть медленная, и держать на ней камеру незачем.
+    xSemaphoreTake(camLock, portMAX_DELAY);
     camera_fb_t* fb = esp_camera_fb_get();
-    if (!fb) { Serial.println("[STREAM] fb_get NULL"); res = ESP_FAIL; break; }
-
     // Сенсор GC2145 отдаёт сырой RGB565, готового JPEG у него нет — жмём сами
     // (тот же frame2jpg, что в уроке 23). Это и есть главный ограничитель к/с.
     uint8_t* jpg = nullptr;
     size_t   jpg_len = 0;
-    bool ok = frame2jpg(fb, JPEG_QUALITY, &jpg, &jpg_len);
-    esp_camera_fb_return(fb);          // сырой кадр драйверу больше не нужен
+    bool ok = fb && frame2jpg(fb, JPEG_QUALITY, &jpg, &jpg_len);
+    if (fb) esp_camera_fb_return(fb);  // сырой кадр драйверу больше не нужен
+    xSemaphoreGive(camLock);
+
+    if (!fb) { Serial.println("[STREAM] fb_get NULL"); res = ESP_FAIL; break; }
     if (!ok) { res = ESP_FAIL; break; }
 
     res = httpd_resp_send_chunk(req, STREAM_BOUNDARY, strlen(STREAM_BOUNDARY));
@@ -292,15 +352,14 @@ static int queryInt(httpd_req_t* req, const char* key, int def) {
 }
 
 static esp_err_t sizeHandler(httpd_req_t* req) {
-  int v = queryInt(req, "v", FRAMESIZE_VGA);
-  v = constrain(v, (int)FRAMESIZE_96X96, (int)FRAMESIZE_UXGA);   // OV2640 больше UXGA не умеет
+  int v = queryInt(req, "v", (int)FRAMESIZE_QVGA);
+  v = constrain(v, (int)FRAMESIZE_96X96, (int)FRAMESIZE_UXGA);   // GC2145 больше UXGA не умеет
 
-  sensor_t* s = esp_camera_sensor_get();
-  int rc = s ? s->set_framesize(s, (framesize_t)v) : -1;
-  Serial.printf("[CAM] framesize -> #%d (rc=%d)\n", v, rc);
+  bool ok = applyFramesize((framesize_t)v);
+  Serial.printf("[CAM] framesize -> #%d (%s)\n", v, ok ? "ok" : "fail");
 
   httpd_resp_set_type(req, "text/plain");
-  return httpd_resp_send(req, rc == 0 ? "ok" : "fail", HTTPD_RESP_USE_STRLEN);
+  return httpd_resp_send(req, ok ? "ok" : "fail", HTTPD_RESP_USE_STRLEN);
 }
 
 static esp_err_t flashHandler(httpd_req_t* req) {
@@ -357,7 +416,9 @@ void setup() {
   statusLed(true);
   flashInit();
 
-  if (!initCamera()) {
+  camLock = xSemaphoreCreateMutex();
+
+  if (!initCamera(FRAMESIZE_QVGA)) {
     Serial.println("[CAM] камера не поднялась — прогони lesson_check_cam.");
     return;
   }
