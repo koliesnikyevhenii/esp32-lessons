@@ -16,7 +16,8 @@
 //  Что делает:
 //    - печатает модель чипа, объём и тип PSRAM (от неё зависит разрешение);
 //    - инициализирует камеру (esp_camera_init) и печатает модель сенсора;
-//    - раз в секунду снимает кадр и печатает разрешение + размер JPEG в байтах;
+//    - раз в секунду снимает кадр и печатает разрешение + размер JPEG в байтах
+//      (а если сенсор без аппаратного JPEG — ещё и время программного сжатия);
 //    - если пин подсветки неизвестен (CAM_FLASH_LED = -1), включает «охоту за
 //      LED»: по очереди мигает безопасными GPIO и пишет, каким именно. Смотри на
 //      плату — какой мигнул, тот и вписывай в include/pins.h.
@@ -25,7 +26,10 @@
 //    - "[SYS] PSRAM: найдена, 8192 КБ" -> memory_type в platformio.ini угадан верно;
 //    - "[SYS] PSRAM: НЕ найдена" на модуле N16R8 -> неверный memory_type
 //      (для octal-PSRAM нужен qio_opi, для quad — qio_qspi);
-//    - "[CAM] init OK" + "сенсор PID 0x0026 (OV2640)" -> шлейф вставлен верно;
+//    - "[CAM] init OK" + строка "сенсор PID ..." -> шлейф вставлен верно.
+//      PID 0x0026 = OV2640 (умеет аппаратный JPEG), PID 0x2145 = GC2145 (не
+//      умеет — тогда скетч сам переключается на RGB565 + frame2jpg, и строка
+//      "[CAM] режим:" скажет, как именно он работает);
 //    - "кадр 640x480, 23456 байт" -> камера снимает;
 //    - размер JPEG "дышит" при смене освещения -> это нормально: степень сжатия
 //      зависит от картинки, чем больше деталей и шума, тем больше байт;
@@ -39,11 +43,12 @@
 //    pio device monitor
 //
 //  Пины камеры — в include/pins.h (блок CAM_*, выбор модели через CAM_MODEL_*).
-//  Мы их НЕ выбираем: шлейф OV2640 разведён на плате жёстко.
+//  Мы их НЕ выбираем: шлейф сенсора разведён на плате жёстко.
 // ============================================================================
 
 #include <Arduino.h>
 #include "esp_camera.h"
+#include "img_converters.h"   // frame2jpg(): сжатие RGB565 -> JPEG для сенсоров без аппаратного JPEG
 #include "pins.h"
 
 // ---- Настройки съёмки ------------------------------------------------------
@@ -62,6 +67,9 @@ unsigned long frames         = 0;   // сколько кадров снято в
 unsigned long framesInWindow = 0;   // сколько снято за текущее 10-секундное окно
 unsigned long lastFpsPrint   = 0;
 bool cameraReady = false;
+// Умеет ли сенсор отдавать готовый JPEG. OV2640 — да, GC2145 (наша плата) — нет,
+// и тогда камера работает в RGB565, а сжимает кадр процессор. См. initCamera().
+bool sensorHasJpeg = false;
 
 // ---------------------------------------------------------------------------
 //  Подсветка. У AI-Thinker белый LED жёстко на GPIO4, а у S3-плат разводка
@@ -151,6 +159,11 @@ bool initCamera() {
   // 3) Формат кадра. PIXFORMAT_JPEG = сенсор отдаёт УЖЕ СЖАТЫЙ кадр. Это
   //    принципиально: VGA в RGB565 — это 640*480*2 = 614 400 байт, а в JPEG —
   //    20-40 КБ. Без сжатия поток в браузер не влез бы ни в RAM, ни в Wi-Fi.
+  //
+  //    НО аппаратный JPEG есть не у всех сенсоров: OV2640 умеет, GC2145 (стоит
+  //    на нашей плате) — нет, и esp_camera_init с PIXFORMAT_JPEG у него падает
+  //    с ESP_ERR_NOT_SUPPORTED (0x106). Поэтому пробуем JPEG, а при отказе
+  //    переинициализируемся в RGB565 — дальше кадр сожмёт frame2jpg (урок 23).
   cfg.pixel_format = PIXFORMAT_JPEG;
   cfg.jpeg_quality = JPEG_QUALITY;
 
@@ -173,14 +186,31 @@ bool initCamera() {
   cfg.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
 
   esp_err_t err = esp_camera_init(&cfg);
-  if (err != ESP_OK) {
-    Serial.printf("[CAM] init FAILED: 0x%x (%s)\n", err, esp_err_to_name(err));
-    Serial.println("      0x20001 = сенсор не найден: проверь шлейф, защёлку разъёма");
-    Serial.println("                и выбранную CAM_MODEL_* в include/pins.h;");
-    Serial.println("      0x105   = не хватило памяти: уменьши frame_size / fb_count.");
-    return false;
+  if (err == ESP_OK) {
+    sensorHasJpeg = true;
+    return true;
   }
-  return true;
+
+  if (err == ESP_ERR_NOT_SUPPORTED) {
+    // Сенсор нашёлся, но JPEG не умеет. Не ошибка железа — просто другой чип.
+    Serial.println("[CAM] сенсор не умеет аппаратный JPEG — переключаюсь на RGB565");
+    cfg.pixel_format = PIXFORMAT_RGB565;
+    if (psramFound()) {
+      cfg.frame_size = FRAMESIZE_QVGA;    // RGB565 весит в разы больше JPEG
+    }
+    err = esp_camera_init(&cfg);
+    if (err == ESP_OK) {
+      sensorHasJpeg = false;
+      return true;
+    }
+  }
+
+  Serial.printf("[CAM] init FAILED: 0x%x (%s)\n", err, esp_err_to_name(err));
+  Serial.println("      0x20001 = сенсор не найден: проверь шлейф, защёлку разъёма");
+  Serial.println("                и выбранную CAM_MODEL_* в include/pins.h;");
+  Serial.println("      0x106   = сенсор без аппаратного JPEG, и RGB565 тоже не завёлся;");
+  Serial.println("      0x105   = не хватило памяти: уменьши frame_size / fb_count.");
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -199,6 +229,9 @@ void printSensorInfo() {
   }
   Serial.println();
   Serial.printf("[CAM] адрес по SCCB 0x%02x, XCLK %d Гц\n", s->slv_addr, s->xclk_freq_hz);
+  Serial.printf("[CAM] режим: %s\n", sensorHasJpeg
+                ? "аппаратный JPEG (кадр приходит уже сжатым)"
+                : "RGB565 + программное сжатие frame2jpg (так работают уроки 23-26)");
 }
 
 void setup() {
@@ -265,13 +298,33 @@ void loop() {
 
   frames++;
   framesInWindow++;
-  Serial.printf("[CAM] кадр #%lu: %ux%u, %u байт, снят за %lu мс\n",
-                frames, (unsigned)fb->width, (unsigned)fb->height,
-                (unsigned)fb->len, millis() - t0);
+  unsigned long grab_ms = millis() - t0;
+  unsigned w = fb->width, h = fb->height, raw_len = fb->len;
 
-  // ОБЯЗАТЕЛЬНО вернуть буфер драйверу. Забудешь — через fb_count кадров
-  // esp_camera_fb_get() начнёт возвращать NULL, и камера "сломается".
-  esp_camera_fb_return(fb);
+  if (sensorHasJpeg) {
+    Serial.printf("[CAM] кадр #%lu: %ux%u, JPEG %u байт, снят за %lu мс\n",
+                  frames, w, h, raw_len, grab_ms);
+    // ОБЯЗАТЕЛЬНО вернуть буфер драйверу. Забудешь — через fb_count кадров
+    // esp_camera_fb_get() начнёт возвращать NULL, и камера "сломается".
+    esp_camera_fb_return(fb);
+  } else {
+    // Сырой кадр сжимаем сами — и заодно меряем, во что это обходится.
+    uint8_t* jpg = nullptr;
+    size_t   jpg_len = 0;
+    unsigned long t1 = millis();
+    bool ok = frame2jpg(fb, 80, &jpg, &jpg_len);
+    unsigned long enc_ms = millis() - t1;
+    esp_camera_fb_return(fb);           // сырой кадр больше не нужен
+
+    if (!ok) {
+      Serial.println("[CAM] frame2jpg не смогла сжать кадр (мало памяти?)");
+      return;
+    }
+    Serial.printf("[CAM] кадр #%lu: %ux%u, RGB565 %u байт -> JPEG %u байт "
+                  "(снят за %lu мс, сжат за %lu мс)\n",
+                  frames, w, h, raw_len, (unsigned)jpg_len, grab_ms, enc_ms);
+    free(jpg);                          // буфер от frame2jpg наш
+  }
 
   if (millis() - lastFpsPrint >= 10000) {
     Serial.printf("[CAM] за 10 c снято %lu кадров (здесь мы сами тормозим таймером,\n"

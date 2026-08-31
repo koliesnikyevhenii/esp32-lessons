@@ -64,6 +64,7 @@
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include "esp_camera.h"
+#include "img_converters.h"   // frame2jpg(): программное сжатие RGB565 -> JPEG
 #include "esp_http_server.h"
 #include "esp_timer.h"
 #include "pins.h"
@@ -71,6 +72,10 @@
 // ---- Wi-Fi ----------------------------------------------------------------
 const char* SSID = "Vektor_04";
 const char* PASS = "uteam2020";
+
+// Сжатие кадра программное (GC2145 без аппаратного JPEG, см. урок 23):
+// шкала frame2jpg — 0..100, БОЛЬШЕ = лучше картинка и больше байт.
+const int JPEG_QUALITY = 80;
 
 // ---- MQTT-брокер (RabbitMQ + mqtt-плагин) ---------------------------------
 const char* MQTT_BROKER = "192.168.0.7";   // <-- LAN-IP своего ПК
@@ -154,11 +159,13 @@ bool initCamera() {
   cfg.ledc_timer   = LEDC_TIMER_0;
   cfg.ledc_channel = LEDC_CHANNEL_0;
 
-  cfg.pixel_format = PIXFORMAT_JPEG;
-  cfg.jpeg_quality = 12;
+  cfg.pixel_format = PIXFORMAT_RGB565;   // GC2145 не отдаёт JPEG — жмём программно
+  cfg.jpeg_quality = 12;                 // при RGB565 не используется
 
   if (psramFound()) {
-    cfg.frame_size  = FRAMESIZE_VGA;      // 640x480 — компромисс задержки и картинки
+    // Для FPV важнее задержка, чем детализация, а сжатие у нас процессорное
+    // (см. урок 23) — поэтому QVGA, а не VGA.
+    cfg.frame_size  = FRAMESIZE_QVGA;     // 320x240
     cfg.fb_count    = 2;
     cfg.fb_location = CAMERA_FB_IN_PSRAM;
   } else {
@@ -282,16 +289,24 @@ static esp_err_t streamHandler(httpd_req_t* req) {
     camera_fb_t* fb = esp_camera_fb_get();
     if (!fb) { res = ESP_FAIL; break; }
 
+    // Сенсор GC2145 отдаёт сырой RGB565, готового JPEG у него нет — жмём сами
+    // (тот же frame2jpg, что в уроке 23). Это и есть главный ограничитель к/с.
+    uint8_t* jpg = nullptr;
+    size_t   jpg_len = 0;
+    bool ok = frame2jpg(fb, JPEG_QUALITY, &jpg, &jpg_len);
+    esp_camera_fb_return(fb);          // сырой кадр драйверу больше не нужен
+    if (!ok) { res = ESP_FAIL; break; }
+
     res = httpd_resp_send_chunk(req, STREAM_BOUNDARY, strlen(STREAM_BOUNDARY));
     if (res == ESP_OK) {
-      size_t hlen = snprintf(partBuf, sizeof(partBuf), STREAM_PART, (unsigned)fb->len);
+      size_t hlen = snprintf(partBuf, sizeof(partBuf), STREAM_PART, (unsigned)jpg_len);
       res = httpd_resp_send_chunk(req, partBuf, hlen);
     }
-    if (res == ESP_OK) res = httpd_resp_send_chunk(req, (const char*)fb->buf, fb->len);
+    if (res == ESP_OK) res = httpd_resp_send_chunk(req, (const char*)jpg, jpg_len);
 
     windowFrames++;
-    windowBytes += fb->len;
-    esp_camera_fb_return(fb);
+    windowBytes += jpg_len;
+    free(jpg);                         // буфер от frame2jpg наш
     if (res != ESP_OK) break;
 
     int64_t now = esp_timer_get_time();

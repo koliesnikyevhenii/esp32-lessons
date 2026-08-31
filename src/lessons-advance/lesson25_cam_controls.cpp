@@ -1,5 +1,5 @@
 // ============================================================================
-//  Этап 6. Камера — урок 25: все возможности OV2640 в одной панели
+//  Этап 6. Камера — урок 25: все возможности сенсора в одной панели
 // ----------------------------------------------------------------------------
 //  Цель: пощупать, ЧТО вообще умеет сенсор, кроме "выдавать кадры". Урок 24 дал
 //  поток; здесь к потоку добавляется панель управления, которая крутит настройки
@@ -10,14 +10,24 @@
 //  Драйвер отдаёт структуру sensor_t с указателями на функции:
 //
 //      sensor_t* s = esp_camera_sensor_get();
-//      s->set_brightness(s, 1);        // <- пишем регистры OV2640 по SCCB
+//      s->set_brightness(s, 1);        // <- пишем регистры сенсора по SCCB
 //      s->status.brightness;           // <- текущее значение
 //
 //  То есть set_* — это не "фильтр в прошивке", а команда чипу камеры. Поэтому
 //  оно бесплатно по процессору: ESP32 не обрабатывает пиксели вообще.
 //
+//  Ровно одно исключение — quality. На нашей плате стоит GC2145, он не умеет
+//  отдавать JPEG, и кадр сжимается программно (frame2jpg, урок 23). Значит
+//  quality здесь — параметр НАШЕГО кодека, а не регистр сенсора: шкала 0..100,
+//  больше = лучше (у аппаратного JPEG в OV2640 было наоборот, 0..63, меньше =
+//  лучше). Заодно видно, чем «настройка железа» отличается от «настройки кода»:
+//  все остальные ползунки процессор не грузят, а этот — грузит.
+//
+//  У GC2145 часть set_* вернёт -1 («unsupported») — так и должно быть, набор
+//  регистров у каждого сенсора свой. Панель честно покажет это статусом.
+//
 //  Что изучаем (и что смотрим глазами):
-//    - РАЗМЕР И КАЧЕСТВО:    framesize, quality  -> к/с и битрейт;
+//    - РАЗМЕР И КАЧЕСТВО:    framesize (сенсор) и quality (наш кодек) -> к/с и битрейт;
 //    - ЯРКОСТЬ/ЦВЕТ:         brightness, contrast, saturation;
 //    - ЭФФЕКТЫ:              special_effect (негатив, ч/б, сепия, тонировки);
 //    - ГЕОМЕТРИЯ:            hmirror, vflip (пригодится, когда камера на роботе
@@ -48,6 +58,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include "esp_camera.h"
+#include "img_converters.h"   // frame2jpg(): программное сжатие RGB565 -> JPEG
 #include "esp_http_server.h"
 #include "esp_timer.h"
 #include "pins.h"
@@ -68,6 +79,11 @@ volatile float streamFps     = 0;
 volatile float streamKbps    = 0;
 volatile int   streamClients = 0;
 int flashLevel = 0;                      // помним, чтобы отдавать в /status
+
+// quality здесь — НЕ регистр сенсора. GC2145 на нашей плате не умеет JPEG,
+// кадр жмёт frame2jpg (см. урок 23), и её шкала другая: 0..100, больше = лучше.
+// Поэтому единственный «нежелезный» контрол на странице — вот эта переменная.
+int jpegQuality = 80;
 
 // ---- Подсветка и индикатор (на S3-платах пины не стандартизованы -> в pins.h -1) ----
 void flashInit() {
@@ -113,11 +129,13 @@ bool initCamera() {
   cfg.ledc_timer   = LEDC_TIMER_0;
   cfg.ledc_channel = LEDC_CHANNEL_0;
 
-  cfg.pixel_format = PIXFORMAT_JPEG;
-  cfg.jpeg_quality = 12;
+  cfg.pixel_format = PIXFORMAT_RGB565;   // GC2145 не отдаёт JPEG — жмём программно
+  cfg.jpeg_quality = 12;                 // при RGB565 не используется
 
   if (psramFound()) {
-    cfg.frame_size  = FRAMESIZE_VGA;
+    // Сжатие процессорное, его цена растёт с площадью кадра: стартуем с QVGA,
+    // а ползунком framesize можно поднять и увидеть, как проседают к/с.
+    cfg.frame_size  = FRAMESIZE_QVGA;
     cfg.fb_count    = 2;
     cfg.fb_location = CAMERA_FB_IN_PSRAM;
   } else {
@@ -172,7 +190,7 @@ static const char PAGE_HTML[] = R"HTML(
 const GROUPS=[
  ["Размер и качество",[
   {v:'framesize',t:'s',o:[[5,'QVGA 320x240'],[6,'CIF 400x296'],[7,'HVGA 480x320'],[8,'VGA 640x480'],[9,'SVGA 800x600'],[10,'XGA 1024x768'],[11,'HD 1280x720'],[12,'SXGA 1280x1024'],[13,'UXGA 1600x1200']],l:'разрешение'},
-  {v:'quality',t:'r',min:4,max:63,l:'quality (меньше=лучше)'},
+  {v:'quality',t:'r',min:10,max:95,l:'quality (программное сжатие, больше=лучше)'},
  ]],
  ["Яркость и цвет",[
   {v:'brightness',t:'r',min:-2,max:2,l:'brightness'},
@@ -281,16 +299,23 @@ static esp_err_t streamHandler(httpd_req_t* req) {
     camera_fb_t* fb = esp_camera_fb_get();
     if (!fb) { res = ESP_FAIL; break; }
 
+    // Сенсор отдаёт сырой RGB565 — сжимаем сами (см. урок 23).
+    uint8_t* jpg = nullptr;
+    size_t   jpg_len = 0;
+    bool ok = frame2jpg(fb, jpegQuality, &jpg, &jpg_len);
+    esp_camera_fb_return(fb);          // сырой кадр драйверу больше не нужен
+    if (!ok) { res = ESP_FAIL; break; }
+
     res = httpd_resp_send_chunk(req, STREAM_BOUNDARY, strlen(STREAM_BOUNDARY));
     if (res == ESP_OK) {
-      size_t hlen = snprintf(partBuf, sizeof(partBuf), STREAM_PART, (unsigned)fb->len);
+      size_t hlen = snprintf(partBuf, sizeof(partBuf), STREAM_PART, (unsigned)jpg_len);
       res = httpd_resp_send_chunk(req, partBuf, hlen);
     }
-    if (res == ESP_OK) res = httpd_resp_send_chunk(req, (const char*)fb->buf, fb->len);
+    if (res == ESP_OK) res = httpd_resp_send_chunk(req, (const char*)jpg, jpg_len);
 
     windowFrames++;
-    windowBytes += fb->len;
-    esp_camera_fb_return(fb);
+    windowBytes += jpg_len;
+    free(jpg);                         // буфер от frame2jpg наш
     if (res != ESP_OK) break;
 
     int64_t now = esp_timer_get_time();
@@ -322,11 +347,17 @@ static int applyControl(const char* var, int val) {
     return 0;
   }
 
+  // quality обрабатываем ДО сенсора: у нас это параметр программного кодека,
+  // а не регистр. s->set_quality() на RGB565-сенсоре просто вернул бы -1.
+  if (!strcmp(var, "quality")) {
+    jpegQuality = constrain(val, 10, 95);
+    return 0;
+  }
+
   sensor_t* s = esp_camera_sensor_get();
   if (!s) return -1;
 
   if (!strcmp(var, "framesize"))      return s->set_framesize(s, (framesize_t)constrain(val, 0, (int)FRAMESIZE_UXGA));
-  if (!strcmp(var, "quality"))        return s->set_quality(s, constrain(val, 4, 63));
   if (!strcmp(var, "brightness"))     return s->set_brightness(s, val);
   if (!strcmp(var, "contrast"))       return s->set_contrast(s, val);
   if (!strcmp(var, "saturation"))     return s->set_saturation(s, val);
@@ -387,7 +418,7 @@ static esp_err_t statusHandler(httpd_req_t* req) {
     "\"aec\":%u,\"aec2\":%u,\"ae_level\":%d,\"aec_value\":%u,"
     "\"agc\":%u,\"agc_gain\":%u,\"gainceiling\":%u,"
     "\"bpc\":%u,\"wpc\":%u,\"raw_gma\":%u,\"lenc\":%u,\"colorbar\":%u,\"flash\":%d}",
-    s->status.framesize, s->status.quality, s->status.brightness, s->status.contrast,
+    s->status.framesize, jpegQuality, s->status.brightness, s->status.contrast,
     s->status.saturation, s->status.special_effect, s->status.hmirror, s->status.vflip,
     s->status.dcw, s->status.awb, s->status.awb_gain, s->status.wb_mode,
     s->status.aec, s->status.aec2, s->status.ae_level, s->status.aec_value,

@@ -85,7 +85,7 @@ LAN IP, **not** localhost), and use a non-`guest` RabbitMQ user (`guest` only wo
 ## Camera lessons — ESP32-S3-CAM (Этап 6)
 
 Lessons 23–26 + `lesson_check_cam` run on a **HW-679 ESP32-S3-CAM** (ESP32-S3-WROOM-1-N16R8:
-16 MB flash, 8 MB **octal** PSRAM, OV2640, USB-C) — a different board **and a different chip**
+16 MB flash, 8 MB **octal** PSRAM, USB-C) — a different board **and a different chip**
 from the DevKit. This is the single most important thing to keep in mind when touching them:
 
 - their envs `extends = cam_s3`, a plain section in `platformio.ini` holding
@@ -93,16 +93,35 @@ from the DevKit. This is the single most important thing to keep in mind when to
   `partitions = default_16MB.csv`, `flash_size = 16MB` and
   `-DBOARD_HAS_PSRAM -DARDUINO_USB_MODE=1 -DARDUINO_USB_CDC_ON_BOOT=1`. `extends` **does**
   override the `board` from `[env]` (verified);
+- **the sensor is a GC2145, not an OV2640** (verified on hardware: PID `0x2145`, `esp_camera_sensor_get_info()` reports `support_jpeg = false`). It has **no hardware JPEG**, so
+  `esp_camera_init()` with `PIXFORMAT_JPEG` fails with `ESP_ERR_NOT_SUPPORTED` (`0x106`) and
+  the driver logs `JPEG format is not supported on this sensor`. Every camera sketch therefore
+  runs the sensor in **`PIXFORMAT_RGB565`** and compresses each frame in software with
+  **`frame2jpg()`** from `img_converters.h` (also in the core, no `lib_deps`), then **`free()`s**
+  that buffer — the raw `fb` goes back via `esp_camera_fb_return()` as usual, so there are now
+  **two** buffers to release per frame. Consequences to keep in mind when editing:
+  quality is the `frame2jpg` scale (**0..100, higher = better**), not the sensor's 0..63
+  lower-is-better; the streaming lessons default to **QVGA** because compression, not Wi-Fi,
+  is the bottleneck; and in lesson 25 `quality` is the one control that writes a firmware
+  variable instead of a sensor register. `lesson_check_cam` tries JPEG, falls back to RGB565 and
+  prints which mode it got — if a board turns out to carry an OV2640, `PIXFORMAT_JPEG` +
+  `fb->buf` can go back and will be much faster;
 - **`memory_type` is the fragile bit:** `qio_opi` for octal PSRAM (N16R8 / N8R8), `qio_qspi` for
   quad (N8R2). Wrong value → `psramFound()` is false → QVGA only. `lesson_check_cam` prints the
   PSRAM size in KB precisely so this is a one-run check;
-- USB-C on S3 is the chip's **native** USB, so `Serial` is USB-CDC (`CDC_ON_BOOT=1`), the port
-  re-enumerates after every flash, and each camera `setup()` starts with `delay(1500)` or the
-  first lines are lost. If a board turns out to have a CH340/CP2102 bridge instead, flip
-  `CDC_ON_BOOT` to 0 — `pio device list` VID/PID tells which (303A:1001 = native);
+- USB-C on S3 is *usually* the chip's **native** USB — but **this board has a CH340 bridge**
+  (`pio device list` → `1A86:7523`), so `[cam_s3]` carries `-DARDUINO_USB_CDC_ON_BOOT=0` and
+  `Serial` goes to UART0. With `=1` the monitor stays **completely empty** while flashing still
+  works. `pio device list` VID/PID tells which board is which (`303A:1001` = native USB → then
+  `=1` is right). The `delay(1500)` at the top of each camera `setup()` is a leftover of the
+  native-USB case and harmless here;
+- **the serial monitor holds this board in reset** unless DTR/RTS are left alone: CH340 drives
+  the auto-reset circuit, so an open monitor means no output *and* a dead Wi-Fi server (the
+  symptom is "the page was working, then it wasn't"). `[env]` therefore sets `monitor_dtr = 0`
+  and `monitor_rts = 0`; uploading is unaffected. Do not remove them;
 - `esp_camera.h` ships **inside** the arduino-esp32 core — no `lib_deps` for it (verified on core
   2.0.17 / platform 7.0.1). Only lesson 26 needs a library (`PubSubClient`);
-- the `CAM_*` pins in `pins.h` are **not chosen by us** — the OV2640 ribbon is hard-wired on the
+- the `CAM_*` pins in `pins.h` are **not chosen by us** — the sensor ribbon is hard-wired on the
   module. `pins.h` carries a `CAM_MODEL_*` switch (`ESP32S3_CAM` default, `XIAO_ESP32S3`,
   `AI_THINKER`); numbers colliding with DevKit names (`CAM_Y7 18` vs `LED_YELLOW 18`) are not a
   conflict — different boards, different firmware;
@@ -117,11 +136,13 @@ from the DevKit. This is the single most important thing to keep in mind when to
 - hardware, flashing (native USB, no GPIO0 jumper), power and failure modes:
   `src/lessons-advance/documentation/esp32cam_hardware.md`.
 
-- **lesson_check_cam** — no Wi-Fi diagnostic: PSRAM, `esp_camera_init`, sensor PID, one frame per
-  second to Serial, flash-LED blink. Run it first, like `lesson_check_mpu`.
+- **lesson_check_cam** — no Wi-Fi diagnostic: PSRAM, `esp_camera_init` (JPEG, else RGB565),
+  sensor PID + whether it does hardware JPEG, one frame per second to Serial (with the software
+  compression time when there is no hardware JPEG), flash-LED blink. Run it first, like
+  `lesson_check_mpu`.
 - **lesson23_cam_snapshot** — single JPEG frame over HTTP with the familiar sync `WebServer`
-  (`/jpg`). Teaches the frame lifecycle (`fb_get` → send → **`fb_return`**) and why binary bodies
-  need `setContentLength()` + `client.write()`.
+  (`/jpg`). Teaches the frame lifecycle (`fb_get` → **`frame2jpg`** → send → `fb_return` +
+  `free`) and why binary bodies need `setContentLength()` + `client.write()`.
 - **lesson24_cam_stream** — MJPEG (`multipart/x-mixed-replace`) via **`esp_http_server`**, because
   a stream handler never returns and would block the sync `WebServer`'s `loop()` forever. **Two
   servers:** page on `:80`, stream on `:81` — and the second one needs a distinct `ctrl_port`
@@ -129,7 +150,9 @@ from the DevKit. This is the single most important thing to keep in mind when to
 - **lesson25_cam_controls** — the whole `sensor_t` control surface (`framesize`, `quality`,
   brightness/contrast/saturation, `special_effect`, mirror/flip, awb/aec/agc, bpc/wpc/lenc,
   `colorbar`) behind `/control?var=&val=` + `/status`. The point of the lesson: `set_*` writes
-  OV2640 registers over SCCB, it is not a filter in our firmware.
+  sensor registers over SCCB, it is not a filter in our firmware. **`quality` is the exception**
+  — it feeds `frame2jpg`, so it is the one slider that costs CPU and moves the fps; several
+  other `set_*` calls return `unsupported` on GC2145, which is expected.
 - **lesson26_fpv_robot** — FPV: stream + on-page D-pad. The camera **does not drive motors**; it
   republishes button presses into `commands/esp32/drive`, which lesson 22 already consumes, so the
   robot firmware, the backend and the dashboard need **no changes**. Two boards, one broker.

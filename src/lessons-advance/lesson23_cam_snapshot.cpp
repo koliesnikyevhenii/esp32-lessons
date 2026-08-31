@@ -13,6 +13,9 @@
 //
 //  Что изучаем:
 //    - esp_camera_fb_get() / esp_camera_fb_return() — жизненный цикл кадра;
+//    - frame2jpg() — программное сжатие: на нашей плате стоит сенсор GC2145,
+//      а он, в отличие от OV2640, JPEG сам не умеет (проверяется lesson_check_cam:
+//      "сенсор PID 0x2145 (GC2145), JPEG: нет");
 //    - Content-Type: image/jpeg и setContentLength() — как отдать БИНАРНЫЕ данные
 //      (server.send() умеет только текст, поэтому пишем в клиента напрямую);
 //    - кеш браузера: без ?t=<время> вторая картинка приедет из кеша, а не с камеры;
@@ -37,13 +40,18 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include "esp_camera.h"
+#include "img_converters.h"   // frame2jpg(): программное сжатие RGB565 -> JPEG
 #include "pins.h"
 
 // ---- Wi-Fi ----------------------------------------------------------------
 const char* SSID = "Vektor_04";
 const char* PASS = "uteam2020";
 
-const int JPEG_QUALITY = 12;          // 0..63, меньше = лучше картинка и больше байт
+// Сенсор на этой плате — GC2145, аппаратного JPEG у него НЕТ (в отличие от
+// OV2640): esp_camera_init с PIXFORMAT_JPEG падает с ESP_ERR_NOT_SUPPORTED.
+// Поэтому снимаем сырой RGB565 и жмём в JPEG сами, процессором.
+// Осторожно: у frame2jpg качество 0..100 и БОЛЬШЕ = лучше (у сенсора наоборот).
+const int JPEG_QUALITY = 80;          // 0..100, больше = лучше картинка и больше байт
 
 WebServer server(80);
 bool cameraReady = false;
@@ -101,11 +109,11 @@ bool initCamera() {
   cfg.ledc_timer   = LEDC_TIMER_0;
   cfg.ledc_channel = LEDC_CHANNEL_0;
 
-  cfg.pixel_format = PIXFORMAT_JPEG;
-  cfg.jpeg_quality = JPEG_QUALITY;
+  cfg.pixel_format = PIXFORMAT_RGB565;   // сырой кадр: 2 байта на пиксель
+  cfg.jpeg_quality = 12;                 // при RGB565 не используется, но поле должно быть валидным
 
   if (psramFound()) {
-    cfg.frame_size  = FRAMESIZE_VGA;      // 640x480
+    cfg.frame_size  = FRAMESIZE_VGA;      // 640x480 = 614 КБ на буфер — только в PSRAM
     cfg.fb_count    = 2;
     cfg.fb_location = CAMERA_FB_IN_PSRAM;
   } else {
@@ -180,6 +188,10 @@ void handleRoot() {
 //  server.send() кладёт в тело СТРОКУ, а в JPEG есть нулевые байты — строкой
 //  его не передать. Поэтому: объявляем длину, отправляем пустое тело с нужными
 //  заголовками, а байты пишем в TCP-сокет напрямую через client.write().
+//
+//  Кадр приезжает сырым (RGB565), поэтому между «снять» и «отдать» появился
+//  третий шаг — frame2jpg(). Буфер под JPEG она выделяет сама, и его НУЖНО
+//  free(). Это и есть цена отсутствия аппаратного JPEG: сжатие ест процессор.
 // ---------------------------------------------------------------------------
 void handleJpg() {
   camera_fb_t* fb = esp_camera_fb_get();
@@ -189,21 +201,37 @@ void handleJpg() {
     return;
   }
 
+  uint8_t* jpg     = nullptr;
+  size_t   jpg_len = 0;
+  unsigned int w = fb->width, h = fb->height;
+  unsigned long t0 = millis();
+  bool ok = frame2jpg(fb, JPEG_QUALITY, &jpg, &jpg_len);
+  unsigned long enc_ms = millis() - t0;
+
+  // Кадр драйверу возвращаем сразу: JPEG уже лежит в отдельном буфере.
+  esp_camera_fb_return(fb);
+
+  if (!ok) {
+    server.send(500, "text/plain", "jpeg encode failed");
+    Serial.println("[CAM] frame2jpg не смогла сжать кадр");
+    return;
+  }
+
   shots++;
   // Запрещаем кеширование и на стороне сервера — плюс к ?t= на клиенте.
   server.sendHeader("Cache-Control", "no-store");
-  server.setContentLength(fb->len);
+  server.setContentLength(jpg_len);
   server.send(200, "image/jpeg", "");
 
   WiFiClient client = server.client();
-  size_t sent = client.write(fb->buf, fb->len);
+  size_t sent = client.write(jpg, jpg_len);
 
-  Serial.printf("[HTTP] кадр #%lu: %ux%u, %u байт (отправлено %u)\n",
-                shots, (unsigned)fb->width, (unsigned)fb->height,
-                (unsigned)fb->len, (unsigned)sent);
+  Serial.printf("[HTTP] кадр #%lu: %ux%u, JPEG %u байт (сжатие %lu мс, отправлено %u)\n",
+                shots, w, h, (unsigned)jpg_len, enc_ms, (unsigned)sent);
 
-  // Вернуть буфер драйверу ОБЯЗАТЕЛЬНО и ОБЯЗАТЕЛЬНО после отправки.
-  esp_camera_fb_return(fb);
+  // Буфер от frame2jpg наш — освободить ОБЯЗАТЕЛЬНО, иначе через десяток
+  // кадров кончится куча и сервер молча перестанет отвечать.
+  free(jpg);
 }
 
 // ---------------------------------------------------------------------------

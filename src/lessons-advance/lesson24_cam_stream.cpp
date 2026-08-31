@@ -18,8 +18,9 @@
 //    - ДВА сервера на двух портах (80 — страница и кнопки, 81 — стрим): пока
 //      воркер занят бесконечным стримом, обычные запросы на этот же сервер
 //      будут ждать в очереди. Ровно так сделано в примере CameraWebServer;
-//    - цена разрешения: сравни к/с на QVGA / VGA / SVGA. Ограничение не в
-//      сенсоре, а в Wi-Fi и в JPEG-сжатии;
+//    - цена разрешения: сравни к/с на QVGA / VGA / SVGA. На нашей плате стоит
+//      сенсор GC2145 без аппаратного JPEG, поэтому кадр жмёт процессор
+//      (frame2jpg, как в уроке 23) — упрёмся мы именно в сжатие, а не в Wi-Fi;
 //    - CAMERA_GRAB_LATEST — отдавать самый свежий кадр, чтобы видео не отставало.
 //
 //  Эндпоинты:
@@ -40,6 +41,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include "esp_camera.h"
+#include "img_converters.h"   // frame2jpg(): программное сжатие RGB565 -> JPEG
 #include "esp_http_server.h"
 #include "esp_timer.h"
 #include "pins.h"
@@ -48,7 +50,9 @@
 const char* SSID = "Vektor_04";
 const char* PASS = "uteam2020";
 
-const int JPEG_QUALITY = 12;
+// GC2145 (сенсор на нашей плате) аппаратного JPEG не умеет, кадр жмётся
+// программно через frame2jpg — а у неё шкала 0..100 и БОЛЬШЕ = лучше.
+const int JPEG_QUALITY = 80;
 
 // ---- Границы MJPEG ---------------------------------------------------------
 // Разделитель может быть любой строкой, которой точно нет в бинарных данных.
@@ -115,11 +119,14 @@ bool initCamera() {
   cfg.ledc_timer   = LEDC_TIMER_0;
   cfg.ledc_channel = LEDC_CHANNEL_0;
 
-  cfg.pixel_format = PIXFORMAT_JPEG;
-  cfg.jpeg_quality = JPEG_QUALITY;
+  cfg.pixel_format = PIXFORMAT_RGB565;   // сырой кадр: сжимать будем сами
+  cfg.jpeg_quality = 12;                 // при RGB565 не используется
 
   if (psramFound()) {
-    cfg.frame_size  = FRAMESIZE_VGA;
+    // На OV2640 здесь стояла бы VGA. У нас сжатие делает процессор, а его цена
+    // растёт с площадью кадра — на VGA выходит 1-2 к/с. Стартуем с QVGA,
+    // разрешение можно поднять кнопкой на странице и сравнить к/с.
+    cfg.frame_size  = FRAMESIZE_QVGA;
     cfg.fb_count    = 2;
     cfg.fb_location = CAMERA_FB_IN_PSRAM;
   } else {
@@ -223,18 +230,26 @@ static esp_err_t streamHandler(httpd_req_t* req) {
     camera_fb_t* fb = esp_camera_fb_get();
     if (!fb) { Serial.println("[STREAM] fb_get NULL"); res = ESP_FAIL; break; }
 
+    // Сенсор GC2145 отдаёт сырой RGB565, готового JPEG у него нет — жмём сами
+    // (тот же frame2jpg, что в уроке 23). Это и есть главный ограничитель к/с.
+    uint8_t* jpg = nullptr;
+    size_t   jpg_len = 0;
+    bool ok = frame2jpg(fb, JPEG_QUALITY, &jpg, &jpg_len);
+    esp_camera_fb_return(fb);          // сырой кадр драйверу больше не нужен
+    if (!ok) { res = ESP_FAIL; break; }
+
     res = httpd_resp_send_chunk(req, STREAM_BOUNDARY, strlen(STREAM_BOUNDARY));
     if (res == ESP_OK) {
-      size_t hlen = snprintf(partBuf, sizeof(partBuf), STREAM_PART, (unsigned)fb->len);
+      size_t hlen = snprintf(partBuf, sizeof(partBuf), STREAM_PART, (unsigned)jpg_len);
       res = httpd_resp_send_chunk(req, partBuf, hlen);
     }
     if (res == ESP_OK) {
-      res = httpd_resp_send_chunk(req, (const char*)fb->buf, fb->len);
+      res = httpd_resp_send_chunk(req, (const char*)jpg, jpg_len);
     }
 
     windowFrames++;
-    windowBytes += fb->len;
-    esp_camera_fb_return(fb);          // вернуть буфер СРАЗУ после отправки
+    windowBytes += jpg_len;
+    free(jpg);                         // буфер от frame2jpg наш — освободить ОБЯЗАТЕЛЬНО
 
     if (res != ESP_OK) break;          // клиент ушёл
 
