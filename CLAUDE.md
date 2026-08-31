@@ -177,9 +177,20 @@ from the DevKit. This is the single most important thing to keep in mind when to
   brightness/contrast/saturation, `special_effect`, mirror/flip, awb/aec/agc, bpc/wpc/lenc,
   `colorbar`) behind `/control?var=&val=` + `/status`. The point of the lesson: `set_*` writes
   sensor registers over SCCB, it is not a filter in our firmware. **`quality` is the exception**
-  — it feeds `frame2jpg`, so it is the one slider that costs CPU and moves the fps; several
-  other `set_*` calls return `unsupported` on GC2145, which is expected. **`framesize` is the
-  other exception:** `applyControl` intercepts it *before* touching `sensor_t` and re-inits the
+  — it feeds `frame2jpg`, so it is the one slider that costs CPU and moves the fps. **On this
+  board almost nothing else in `sensor_t` is real:** `gc2145_init()` in the prebuilt
+  `libesp32-camera.a` wires up only `set_pixformat`, `set_framesize`, `set_hmirror`, `set_vflip`,
+  `set_colorbar`, `set_reg`/`get_reg` — every other setter points at `set_dummy`, a two-instruction
+  `return -1` (verified with `objdump -r` on `gc2145.c.obj`: the `.literal.gc2145_init` pool holds
+  `set_dummy` once and it is stored into ~20 struct slots). So brightness/contrast/saturation,
+  `special_effect`, `dcw`, awb/aec/agc, `ae_level`, `aec_value`, `agc_gain`, `gainceiling`,
+  bpc/wpc/`raw_gma`/`lenc` all answer `unsupported` and change nothing — this is the driver, not a
+  bug in the sketch, and not something a different `val` will fix. Working controls on GC2145:
+  **framesize, quality, hmirror, vflip, colorbar** (plus `flash`, which does nothing while
+  `CAM_FLASH_LED` is −1). The panel marks the dead rows struck-through from the `/control`
+  response — keep that feedback, it is what stops the page from looking broken. Reviving the rest
+  means writing GC2145 registers by hand through `set_reg`, not calling `set_*`. **`framesize` is
+  the other exception:** `applyControl` intercepts it *before* touching `sensor_t` and re-inits the
   camera (see the RGB565 framesize bullet above), so it is the one control that is not an SCCB
   register write at all.
 - **lesson26_fpv_robot** — FPV: stream + on-page D-pad. The camera **does not drive motors**; it

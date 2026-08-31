@@ -226,6 +226,8 @@ static const char PAGE_HTML[] = R"HTML(
  .c output{width:44px;text-align:right;font-variant-numeric:tabular-nums;color:#8cf}
  #stats{color:#8cf;font-variant-numeric:tabular-nums;margin-top:8px}
  button{padding:6px 10px;cursor:pointer}
+ .st{font-size:11px;color:#f88;white-space:nowrap}
+ .c.bad label{color:#777;text-decoration:line-through}
 </style></head><body>
 <h1>Урок 25 — что умеет OV2640</h1>
 <div class="wrap">
@@ -281,7 +283,18 @@ const GROUPS=[
 ];
 const cam=document.getElementById('cam');
 function open_(){ cam.src='http://'+location.hostname+':81/stream?t='+Date.now(); }
-function set(v,val){ fetch('/control?var='+v+'&val='+val); }
+
+async function set(v,val){
+  const el=document.getElementById('f_'+v);
+  const row=el?el.closest('.c'):null;
+  try{
+    const t=await (await fetch('/control?var='+v+'&val='+val)).text();
+    if(!row) return;
+    const bad=(t!=='ok');
+    row.classList.toggle('bad',bad);
+    row.querySelector('.st').textContent=bad?'не поддерживается сенсором':'';
+  }catch(e){}
+}
 
 const panel=document.getElementById('panel');
 for(const [title,items] of GROUPS){
@@ -307,6 +320,7 @@ for(const [title,items] of GROUPS){
       row.appendChild(el);
     }
     el.id='f_'+it.v;
+    const st=document.createElement('span'); st.className='st'; row.appendChild(st);
     panel.appendChild(row);
   }
 }

@@ -114,6 +114,12 @@ QueueHandle_t cmdQueue = NULL;
 // ---- Состояние -------------------------------------------------------------
 volatile float streamFps  = 0;
 volatile float streamKbps = 0;
+// Разбивка времени кадра по стадиям (мс, среднее за секунду). Нужна, чтобы
+// не гадать, почему видео отстаёт: съёмка, сжатие и отправка тормозят
+// по совершенно разным причинам и лечатся тоже по-разному.
+volatile float streamMsGrab = 0;   // ожидание готового кадра от сенсора
+volatile float streamMsJpeg = 0;   // frame2jpg() — процессорное сжатие
+volatile float streamMsSend = 0;   // запись в сокет = упёрлись в Wi-Fi
 volatile uint32_t cmdSent = 0;      // сколько команд уехало в брокер
 volatile int robotGuard   = -1;     // -1 = ещё не слышали, 0 = ок, 1 = робот заблокирован
 unsigned long lastTelemetry = 0;
@@ -257,7 +263,8 @@ setInterval(async()=>{
     const s=await (await fetch('/stats')).json();
     document.getElementById('stats').textContent =
       s.fps.toFixed(1)+' к/с, '+s.kbps.toFixed(0)+' кбит/с, RSSI '+s.rssi+
-      ' dBm, MQTT: '+(s.mqtt?'ok':'нет')+', команд отправлено: '+s.sent;
+      ' dBm, MQTT: '+(s.mqtt?'ok':'нет')+', команд отправлено: '+s.sent+
+      ' | съёмка '+s.grab+' мс, сжатие '+s.jpeg+' мс, отправка '+s.send+' мс';
     const g=document.getElementById('guard');
     g.textContent = s.guard===1 ? 'РОБОТ ЗАБЛОКИРОВАН ПО НАКЛОНУ — команды движения игнорируются'
                   : s.guard===0 ? '' : 'состояние робота ещё не получено';
@@ -284,10 +291,13 @@ static esp_err_t streamHandler(httpd_req_t* req) {
   char partBuf[72];
   int64_t windowStart = esp_timer_get_time();
   uint32_t windowFrames = 0, windowBytes = 0;
+  int64_t accGrab = 0, accJpeg = 0, accSend = 0;
 
   while (true) {
+    int64_t t0 = esp_timer_get_time();
     camera_fb_t* fb = esp_camera_fb_get();
     if (!fb) { res = ESP_FAIL; break; }
+    int64_t t1 = esp_timer_get_time();
 
     // Сенсор GC2145 отдаёт сырой RGB565, готового JPEG у него нет — жмём сами
     // (тот же frame2jpg, что в уроке 23). Это и есть главный ограничитель к/с.
@@ -296,6 +306,7 @@ static esp_err_t streamHandler(httpd_req_t* req) {
     bool ok = frame2jpg(fb, JPEG_QUALITY, &jpg, &jpg_len);
     esp_camera_fb_return(fb);          // сырой кадр драйверу больше не нужен
     if (!ok) { res = ESP_FAIL; break; }
+    int64_t t2 = esp_timer_get_time();
 
     res = httpd_resp_send_chunk(req, STREAM_BOUNDARY, strlen(STREAM_BOUNDARY));
     if (res == ESP_OK) {
@@ -303,9 +314,13 @@ static esp_err_t streamHandler(httpd_req_t* req) {
       res = httpd_resp_send_chunk(req, partBuf, hlen);
     }
     if (res == ESP_OK) res = httpd_resp_send_chunk(req, (const char*)jpg, jpg_len);
+    int64_t t3 = esp_timer_get_time();
 
     windowFrames++;
     windowBytes += jpg_len;
+    accGrab += t1 - t0;                // ждали сенсор
+    accJpeg += t2 - t1;                // жгли процессор
+    accSend += t3 - t2;                // ждали сеть
     free(jpg);                         // буфер от frame2jpg наш
     if (res != ESP_OK) break;
 
@@ -314,11 +329,19 @@ static esp_err_t streamHandler(httpd_req_t* req) {
       float sec = (now - windowStart) / 1000000.0f;
       streamFps  = windowFrames / sec;
       streamKbps = (windowBytes * 8.0f / 1000.0f) / sec;
+      streamMsGrab = accGrab / 1000.0f / windowFrames;
+      streamMsJpeg = accJpeg / 1000.0f / windowFrames;
+      streamMsSend = accSend / 1000.0f / windowFrames;
+      Serial.printf("[STREAM] %.1f к/с | съёмка %.0f мс | сжатие %.0f мс | отправка %.0f мс | кадр %u Б\n",
+                    streamFps, streamMsGrab, streamMsJpeg, streamMsSend,
+                    (unsigned)(windowBytes / windowFrames));
       windowStart = now; windowFrames = 0; windowBytes = 0;
+      accGrab = accJpeg = accSend = 0;
     }
   }
 
   streamFps = 0; streamKbps = 0;
+  streamMsGrab = streamMsJpeg = streamMsSend = 0;
   return res;
 }
 
@@ -365,11 +388,13 @@ static esp_err_t driveHandler(httpd_req_t* req) {
 }
 
 static esp_err_t statsHandler(httpd_req_t* req) {
-  char json[224];
+  char json[320];
   snprintf(json, sizeof(json),
-           "{\"fps\":%.1f,\"kbps\":%.0f,\"rssi\":%d,\"mqtt\":%d,\"guard\":%d,\"sent\":%u,\"heap\":%u}",
+           "{\"fps\":%.1f,\"kbps\":%.0f,\"rssi\":%d,\"mqtt\":%d,\"guard\":%d,\"sent\":%u,\"heap\":%u,"
+           "\"grab\":%.0f,\"jpeg\":%.0f,\"send\":%.0f}",
            streamFps, streamKbps, WiFi.RSSI(), mqtt.connected() ? 1 : 0,
-           robotGuard, (unsigned)cmdSent, (unsigned)ESP.getFreeHeap());
+           robotGuard, (unsigned)cmdSent, (unsigned)ESP.getFreeHeap(),
+           streamMsGrab, streamMsJpeg, streamMsSend);
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
 }
