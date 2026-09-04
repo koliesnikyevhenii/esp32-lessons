@@ -75,7 +75,13 @@ There is no test suite or linter despite the empty `test/` dir.
   integrated `yaw`; a **tilt guard** stops the motors and ignores drive commands while
   |pitch| or |roll| exceeds `TILT_LIMIT` 45° (released below `TILT_RELEASE` 35° — hysteresis),
   and reports itself as an ordinary metric `sensors/esp32/guard` (0/1) published **only on
-  change**. Keep `loop()` non-blocking: a `delay` there delays incoming `stop` commands.
+  change**. That guard does **not** trust a single sample, and must not be simplified back to
+  one: `pitch`/`roll` come from the acceleration vector, so the motors' own starting jolt read
+  as 45–48° on a level floor and the guard cut the motors it had just started — the jolt
+  silenced itself. Two filters fix it, both needed: a sample counts only while
+  |a| ≈ 1 g (`ACCEL_TRUST_BAND`, an untrusted sample is skipped whole — it neither arms nor
+  releases nor resets), and arming needs the tilt to hold past the limit for
+  `TILT_DEBOUNCE_MS` 300 ms (measured false trips lived 47–228 ms). Releasing has no debounce. Keep `loop()` non-blocking: a `delay` there delays incoming `stop` commands.
 
 **Topic contracts (must match the .NET side):** telemetry `sensors/<device>/<metric>`,
 commands `commands/<device>/drive`. `<device>` is `esp32` for the robot and `esp32cam` for the
