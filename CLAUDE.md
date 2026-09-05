@@ -15,8 +15,8 @@ in their env (see below). Serial monitor baud: `115200`. Code comments are in Ru
 ```
 include/pins.h                     # shared pin + LEDC channel #defines (the single source of truth for wiring)
 src/lessons-basic/lessonNN_*.cpp   # standalone basic sketches (lessons 02–18)
-src/lessons-advance/lessonNN_*.cpp # advanced IoT/robot/camera sketches (lessons 19–26, + lesson_check_* diagnostics)
-src/lessons-advance/documentation/ # per-lesson notes for the advanced track (19, 20, 22, 23–26 + esp32cam_hardware.md)
+src/lessons-advance/lessonNN_*.cpp # advanced IoT/robot/camera/sonar sketches (lessons 19–28, + lesson_check_* diagnostics)
+src/lessons-advance/documentation/ # per-lesson notes for the advanced track (19, 20, 22, 23–28 + esp32cam_hardware.md)
 src/documentation/                 # notes/docs (ESP32 guide, driver install)
 platformio.ini                     # one [env:lessonNN_*] per lesson, each with build_src_filter
 ```
@@ -208,6 +208,61 @@ from the DevKit. This is the single most important thing to keep in mind when to
   `/drive` runs in the httpd task and `PubSubClient` is **not** thread-safe, so the handler only
   `xQueueSend`s and `loop()` publishes — keep that split if you touch this file.
 
+## Sonar lessons — HC-SR04 + SG90 (Этап 7)
+
+**lesson27_hcsr04** runs on the ordinary DevKit (`esp32dev`, no `extends`) and pulls in
+nothing — no Wi-Fi, no libraries, `pulseIn` only. It is the sensor half of the Этап-7
+autopilot, deliberately kept standalone the way `lesson_check_mpu` is.
+
+- The module **measures time, not distance**: `TRIG` HIGH for 10 µs → an 8-cycle 40 kHz
+  burst → `ECHO` stays HIGH for the round-trip flight time. Distance is *our* arithmetic,
+  and it embeds an assumed speed of sound (`v = 331.4 + 0.606·T`, ~1 cm per 58 µs round
+  trip at 20 °C). The sketch keeps `AIR_TEMP_C` explicit rather than hard-coding `/58`.
+- **`pulseIn` returning 0 is a third state, not "far away".** No echo can equally mean a
+  wall angled away (ultrasound reflects specularly), a soft surface that ate the burst, or
+  a dead sensor. `measureCm()` therefore returns `NAN`, never `MAX_VALID_CM` — do not
+  "simplify" that away when the autopilot lands: treating unknown as free road drives the
+  robot into the wall it cannot hear.
+- Readings outside 2…400 cm are discarded (below 2 cm the transducer is still ringing).
+  A rolling **median of 3** filters flyers; a mean would smear a real approach.
+- `PING_PERIOD_MS` 60 is the datasheet minimum — faster, and the previous ping's echo
+  lands in this measurement. With the 30 ms worst-case `pulseIn` this caps the sensor at
+  ~16 readings/s, which is a physics limit, not a code one.
+- **`pulseIn` blocks** for up to the timeout. Fine here; in the autopilot it would delay
+  `mqtt.loop()`, the 700 ms motor failsafe and the tilt guard — shorten the timeout, or
+  measure via `attachInterrupt`/RMT. Noted in the lesson doc.
+- **`ECHO` is 5 V logic and ESP32 pins are not 5 V tolerant** — it goes through a 1k/2k
+  divider. `TRIG` needs no shifting. `VCC` must be 5 V (a plain HC-SR04 under-performs at
+  3.3 V; the HC-SR04+ / RCWL-1601 variants are the 3.3 V ones).
+- Full theory, failure modes and bench checks:
+  `src/lessons-advance/documentation/lesson27_hcsr04.md`.
+
+**lesson28_servo_sonar** puts that sonar on an **SG90** and sweeps a sector (30…150°,
+step 15°, 9 points) — same DevKit, still no libraries.
+
+- **No `Servo` library on purpose.** A hobby servo is plain LEDC at **50 Hz where the
+  value is a pulse width** (500–2400 µs ≈ 0…180°), so the sketch does
+  `ledcSetup(CH_SERVO, 50, 16)` + `usToDuty()`. 16-bit resolution because the whole
+  interesting range is 2.5–12 % of the period. `CH_SERVO 4` → timer 2 (`ch/2` in core
+  2.x), clear of RGB/buzzer on 0–2 and the camera's flash on 7.
+- **Turn → settle → ping, never measure while moving.** The cone is sweeping, the horn
+  overshoots, and the servo's own motor is a power/EMI disturbance. `SETTLE_MS` 120 covers
+  SG90's ~0.1 s/60° for a 15° step.
+- **A sweep costs ~2 s** (9 × (120 ms + 3 pings)). `sweep()` is deliberately blocking here
+  because nothing else runs; in the autopilot that would starve `mqtt.loop()` and trip the
+  700 ms motor failsafe — there it becomes a per-`loop()` state machine, or the robot
+  stops to look ("stop and look"). Say which when that lesson lands.
+- `servoRelax()` is `ledcWrite(CH_SERVO, 0)`: pulses stop, the horn goes limp, the buzzing
+  and most of the current go away. Used between sweeps.
+- **Power is the failure mode.** SG90 peaks near 700 mA — from the 5 V rail (MP1584EN),
+  never the DevKit's 3V3, plus 470–1000 µF nearby and a common ground. The symptom is a
+  brownout reset exactly when the horn moves, same as the camera in Этап 6.
+- A scan **partly** answers lesson 27's specular-wall problem: a wall that returns nothing
+  head-on does return an echo at the angle where the sonar faces it squarely. `NAN` still
+  means "unknown", and a sweep with no valid point at all prints "двигаться вслепую
+  НЕЛЬЗЯ" rather than "all clear".
+- Full write-up: `src/lessons-advance/documentation/lesson28_servo_sonar.md`.
+
 ## Pin / channel conventions
 
 All hardware wiring lives as `#define`s in `include/pins.h` — check there before assuming a pin. Notable points:
@@ -222,6 +277,20 @@ All hardware wiring lives as `#define`s in `include/pins.h` — check there befo
   were once swapped — 17 for PWM, 33 for SCL; `pins.h` is the truth, not older notes.) The driver's `STBY` is wired
   to `3V3` (always enabled), so no GPIO is reserved for it. `IN1=1,IN2=0`→forward; `IN1=0,IN2=1`→back;
   `IN1=IN2`→stop. If a motor spins the wrong way, swap its two output leads (or the `dir` signs).
+
+- **HC-SR04 sonar (lesson 27):** `SONAR_TRIG 12`, `SONAR_ECHO 39`. Disjoint from `MPU_*`
+  and `MOTOR_*` on purpose — the Этап-7 robot runs all three at once. GPIO39 is
+  **input-only** (so `ECHO` can never be driven by mistake) and has no internal pulls; the
+  divider always drives it. GPIO12 is a **strapping pin** (MTDI — HIGH at reset selects
+  1.8 V flash and the board won't boot); it works because GPIO12 pulls down at reset and the
+  module's `TRIG` input doesn't pull up, but if a board ever stops booting with the sensor
+  attached, move `TRIG` to another free output (16 when DHT11 isn't wired).
+
+- **SG90 servo (lesson 28):** `SERVO_PIN 19`, `CH_SERVO 4`. The DevKit is **out of unused
+  GPIOs** at this point (0/1/3 are boot + UART0, 6–11 flash, 36/39 input-only), so the servo
+  borrows the traffic-light `LED_GREEN 19` — legitimate, since no LEDs are wired on the
+  robot; what matters is that it stays disjoint from `MPU_*`, `MOTOR_*` and `SONAR_*`, which
+  do run together. Power from the 5 V rail, never 3V3.
 
 - **ESP32-S3-CAM (lessons 23–26) — a different board and chip:** the `CAM_*` block at the bottom
   of `pins.h`, selected by `CAM_MODEL_*`. For the default HW-679: XCLK 15, SIOD/SIOC 4/5,
