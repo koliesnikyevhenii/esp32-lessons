@@ -15,8 +15,8 @@ in their env (see below). Serial monitor baud: `115200`. Code comments are in Ru
 ```
 include/pins.h                     # shared pin + LEDC channel #defines (the single source of truth for wiring)
 src/lessons-basic/lessonNN_*.cpp   # standalone basic sketches (lessons 02–18)
-src/lessons-advance/lessonNN_*.cpp # advanced IoT/robot/camera/sonar sketches (lessons 19–28, + lesson_check_* diagnostics)
-src/lessons-advance/documentation/ # per-lesson notes for the advanced track (19, 20, 22, 23–28 + esp32cam_hardware.md)
+src/lessons-advance/lessonNN_*.cpp # advanced IoT/robot/camera/sonar sketches (lessons 19–29, + lesson_check_* diagnostics)
+src/lessons-advance/documentation/ # per-lesson notes for the advanced track (19, 20, 22, 23–29 + esp32cam_hardware.md)
 src/documentation/                 # notes/docs (ESP32 guide, driver install)
 platformio.ini                     # one [env:lessonNN_*] per lesson, each with build_src_filter
 ```
@@ -84,7 +84,8 @@ There is no test suite or linter despite the empty `test/` dir.
   `TILT_DEBOUNCE_MS` 300 ms (measured false trips lived 47–228 ms). Releasing has no debounce. Keep `loop()` non-blocking: a `delay` there delays incoming `stop` commands.
 
 **Topic contracts (must match the .NET side):** telemetry `sensors/<device>/<metric>`,
-commands `commands/<device>/drive`. `<device>` is `esp32` for the robot and `esp32cam` for the
+commands `commands/<device>/drive` — plus `commands/<device>/mode` (`auto`|`manual`) from
+lesson 29 on. `<device>` is `esp32` for the robot and `esp32cam` for the
 camera's own telemetry (lesson 26). Before flashing, set `SSID`/`PASS`, `MQTT_BROKER` (the PC's
 LAN IP, **not** localhost), and use a non-`guest` RabbitMQ user (`guest` only works from localhost).
 
@@ -262,6 +263,51 @@ step 15°, 9 points) — same DevKit, still no libraries.
   means "unknown", and a sweep with no valid point at all prints "двигаться вслепую
   НЕЛЬЗЯ" rather than "all clear".
 - Full write-up: `src/lessons-advance/documentation/lesson28_servo_sonar.md`.
+
+**lesson29_autopilot** is lessons 22 + 28 in one sketch: the robot drives itself, and the
+browser only decides *whether* it may. Four peripherals wired at once (IMU, motors, sonar,
+servo) — this is what the disjoint `pins.h` groups have been building towards.
+
+- **The sweep is no longer allowed to block.** Lesson 28's `sweep()` sat in `delay()` for
+  ~2 s; here that would starve `mqtt.loop()`, the 700 ms motor failsafe and the tilt guard
+  all at once. `serviceScan()` does **one** step per `loop()` (aim the horn, or fire one
+  ping) with the waiting held in `scanNextAt`. Do not re-inline it. `pulseIn` is the one
+  thing still blocking, and its timeout is cut from 30000 µs to **15000 µs** (~2.5 m) for
+  exactly this reason — past that the autopilot doesn't care anyway.
+- **States:** `OFF → SCAN → (DRIVE | TURN) → SCAN …`, plus `BACK` when a sweep finds
+  nowhere to go. Two rules that look redundant and are not: autopilot **always starts with
+  a sweep**, never by driving, and it **sweeps again after every turn** rather than driving
+  on data gathered before the turn. That is "stop and look", and it costs 1.5–2 s a look.
+- **Turns close the loop on the gyro**, not on a stopwatch — `fabsf(yaw - turnStartYaw)`
+  against the goal, so the **sign of `yaw` is irrelevant** (the motors pick the direction,
+  the IMU only counts). A timeout covers a wheel that slips and never turns. `yaw` drift
+  is a non-issue over a 1–2 s turn. The one thing left to calibrate by hand is
+  `SERVO_HIGH_IS_LEFT` — flip it if the robot turns away from the free space.
+- **`UNKNOWN_LIMIT` is lesson 27's third state made operational:** a single silent ping is
+  normal (the wall is past 2.5 m), **four in a row** while moving is 0.3 s of not knowing
+  and stops the robot. Never collapse "no echo" into "far".
+- **The lesson-21 failsafe had to be scoped to manual mode** (`autoState == AUTO_OFF && …`).
+  An autopilot receives no commands by definition, so leaving the failsafe global gives a
+  robot that twitches for 700 ms and stands still. The runaway protection in auto is
+  different: **losing the broker turns the autopilot off**, because without it there is no
+  way to stop the robot and no way to see what it is doing.
+- **Any drive command silently drops it back to manual** — the human grabbed the wheel.
+  That deliberately includes the lesson-26 camera's D-pad, which knows nothing about modes.
+  The tilt guard is the exception: it **pauses** rather than disabling, and resumes with a
+  fresh sweep (the robot may have been picked up and turned around while it was blocked).
+- **Thresholds are not the ones in the guide:** brake at `STOP_CM` **30**, not 20 (70 ms
+  blind between pings plus coasting), call a heading free only past `CLEAR_CM` **45**, and
+  drive at `SPEED_AUTO` **160** vs 200 by hand.
+- **`servoRelax()` is deliberately not used here** — the sonar has to keep facing forward,
+  and a limp horn drifts on a moving robot. Motors use `analogWrite` (auto-assigned LEDC
+  channels 0/1, timer 0) and the servo uses explicit `CH_SERVO 4` (timer 2): no overlap,
+  which is why `CH_SERVO` is not 0–2.
+- New telemetry, all ordinary bare numbers so the .NET side needed no consumer or schema
+  change: `distance` (cm ahead, **`-1` = no echo**, on the 5 Hz timer), `mode` (0/1) and
+  `bearing` (chosen servo angle, 90 = straight) — the last two publish-on-change like
+  `guard`. New command topic `commands/esp32/mode` (`auto`|`manual`); `commands/esp32/drive`
+  is **unchanged on purpose**.
+- Full write-up: `src/lessons-advance/documentation/lesson29_autopilot.md`.
 
 ## Pin / channel conventions
 
