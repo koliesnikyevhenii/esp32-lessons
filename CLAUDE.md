@@ -15,8 +15,8 @@ in their env (see below). Serial monitor baud: `115200`. Code comments are in Ru
 ```
 include/pins.h                     # shared pin + LEDC channel #defines (the single source of truth for wiring)
 src/lessons-basic/lessonNN_*.cpp   # standalone basic sketches (lessons 02–18)
-src/lessons-advance/lessonNN_*.cpp # advanced IoT/robot/camera/sonar sketches (lessons 19–29, + lesson_check_* diagnostics)
-src/lessons-advance/documentation/ # per-lesson notes for the advanced track (19, 20, 22, 23–29 + esp32cam_hardware.md)
+src/lessons-advance/lessonNN_*.cpp # advanced IoT/robot/camera/sonar sketches (lessons 19–30, + lesson_check_* diagnostics)
+src/lessons-advance/documentation/ # per-lesson notes for the advanced track (19, 20, 22, 23–30 + esp32cam_hardware.md)
 src/documentation/                 # notes/docs (ESP32 guide, driver install)
 platformio.ini                     # one [env:lessonNN_*] per lesson, each with build_src_filter
 ```
@@ -309,6 +309,29 @@ servo) — this is what the disjoint `pins.h` groups have been building towards.
   is **unchanged on purpose**.
 - Full write-up: `src/lessons-advance/documentation/lesson29_autopilot.md`.
 
+**lesson30_autopilot_mdd10** is lesson 29 with the **TB6612FNG replaced by a Cytron MDD10A**
+— this is now the robot's current firmware (the camera board still runs lesson 26, unchanged).
+Only the motor layer differs; autopilot, sonar, servo, tilt guard and every MQTT topic are
+byte-for-byte lesson 29, so **the .NET backend, the React dashboard and the camera need no
+changes** (only `CLIENT_ID` is `esp32-lesson30`). `lesson_check_mdd10` is its no-network check.
+
+- **Sign-magnitude, 2 wires per channel:** `DIR` = direction, `PWM` = speed. No IN1/IN2 pair.
+  Pins are a subset of the TB6612 ones (`MDD_DIR1 13`/`MDD_PWM1 25` left, `MDD_DIR2 26`/
+  `MDD_PWM2 33` right), so the same wires move over and 14/27 are freed.
+- **PWM = 0 is a brake** (both outputs to GND), not TB6612's coast — the robot stops harder.
+- **No `analogWrite` here:** it runs at 1 kHz and the motors whine. Explicit LEDC at **20 kHz**,
+  8 bit (speeds stay 0..255) on `CH_MOTOR_L/R` **8/9** — the low-speed LEDC group with its own
+  timers, so it never shares a timer with the 50 Hz servo on `CH_SERVO 4`. Sharing one would let
+  whichever `ledcSetup` ran last set the frequency for both. Do not move them to 4/5.
+- **Reverse pause `REVERSE_PAUSE_MS` 30:** `motorUpdate()` brakes first and flips `DIR` only after
+  the pause, always at PWM 0. The pause is finished by `motorService()` in `loop()` — non-blocking,
+  keep it that way (same rule as lesson 29's scan). `driveStop()`/`driveTank()`/`moving` keep
+  lesson 29's interface, which is why nothing above the motor layer changed.
+- A wheel spinning backwards → `MOTOR_LEFT_INVERT`/`MOTOR_RIGHT_INVERT` (set the same in the check
+  sketch), or swap M1A/M1B. MDD10A logic takes 3.3 V; power input goes to the battery directly,
+  not to the 5 V MP1584EN rail that feeds the servo; common GND is mandatory.
+- Full write-up: `src/lessons-advance/documentation/lesson30_autopilot_mdd10.md`.
+
 ## Pin / channel conventions
 
 All hardware wiring lives as `#define`s in `include/pins.h` — check there before assuming a pin. Notable points:
@@ -323,6 +346,10 @@ All hardware wiring lives as `#define`s in `include/pins.h` — check there befo
   were once swapped — 17 for PWM, 33 for SCL; `pins.h` is the truth, not older notes.) The driver's `STBY` is wired
   to `3V3` (always enabled), so no GPIO is reserved for it. `IN1=1,IN2=0`→forward; `IN1=0,IN2=1`→back;
   `IN1=IN2`→stop. If a motor spins the wrong way, swap its two output leads (or the `dir` signs).
+- **Cytron MDD10A (lesson 30, replaces the TB6612 on the robot):** `MDD_DIR1 13`, `MDD_PWM1 25`
+  (channel 1 = left), `MDD_DIR2 26`, `MDD_PWM2 33` (channel 2 = right), LEDC `CH_MOTOR_L 8` /
+  `CH_MOTOR_R 9` at 20 kHz. Same GPIOs as `MOTOR_AIN1/PWMA/BIN1/PWMB`, so it stays disjoint from
+  `MPU_*`, `SONAR_*` and `SERVO_PIN`; `MOTOR_*` remains for lessons 21/22/29.
 
 - **HC-SR04 sonar (lesson 27):** `SONAR_TRIG 12`, `SONAR_ECHO 39`. Disjoint from `MPU_*`
   and `MOTOR_*` on purpose — the Этап-7 robot runs all three at once. GPIO39 is
