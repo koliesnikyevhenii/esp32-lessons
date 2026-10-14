@@ -1,24 +1,24 @@
 // ============================================================================
-//  CHECK: TB6612FNG — самый простой тест: ОБА мотора ВПЕРЁД одновременно
+//  CHECK: TB6612FNG — the simplest test: BOTH motors FORWARD at the same time
 // ----------------------------------------------------------------------------
-//  Никаких шагов, циклов и диагностики: включились и едем вперёд, пока есть
-//  питание. Нужен, чтобы одним взглядом увидеть — крутятся ли оба колеса и в
-//  одну ли сторону.
+//  No steps, loops or diagnostics: power on and drive forward for as long as
+//  there is power. Needed to see at a glance whether both wheels turn and
+//  whether they turn the same way.
 //
-//  Направление на TB6612FNG: IN1=1, IN2=0 -> вперёд (IN1=IN2 -> стоп).
-//  STBY заведён на 3V3 (всегда включён), скорость — ШИМ на PWMx.
+//  Direction on the TB6612FNG: IN1=1, IN2=0 -> forward (IN1=IN2 -> stop).
+//  STBY is wired to 3V3 (always enabled), speed is PWM on PWMx.
 //
-//  Что смотреть:
-//    • крутятся оба и вперёд          -> проводка в порядке;
-//    • одно колесо назад              -> поменяй два провода этого мотора
-//                                        (или xIN1/xIN2 в pins.h);
-//    • одно колесо молчит             -> гоняй lesson_check_tb6612 (там
-//                                        пошаговая изоляция стороны B).
+//  What to look for:
+//    • both turn, and forward         -> wiring is fine;
+//    • one wheel turns backwards      -> swap that motor's two wires
+//                                        (or xIN1/xIN2 in pins.h);
+//    • one wheel is silent            -> run lesson_check_tb6612 (it has
+//                                        step-by-step isolation of side B).
 //
-//  БЕЗОПАСНОСТЬ: подними колёса над столом — робот поедет СРАЗУ после старта
-//  и не остановится сам.
+//  SAFETY: lift the wheels off the table — the robot moves RIGHT after startup
+//  and won't stop by itself.
 //
-//  Сборка/прошивка:
+//  Build/flash:
 //    pio run -e lesson_check_tb6612_forward -t upload
 //    pio device monitor
 // ============================================================================
@@ -26,7 +26,7 @@
 #include <Arduino.h>
 #include "pins.h"
 
-const int SPEED = 200;   // 0..255 — если мотор не стартует, подними до 255
+const int SPEED = 200;   // 0..255 — if the motor doesn't start, raise to 255
 
 void setup() {
   Serial.begin(115200);
@@ -39,12 +39,12 @@ void setup() {
 
   delay(2000);
 
-  // Мотор A (левый) — вперёд.
+  // Motor A (left) — forward.
   digitalWrite(MOTOR_AIN1, HIGH);
   digitalWrite(MOTOR_AIN2, LOW);
   analogWrite(MOTOR_PWMA, SPEED);
 
-  // Мотор B (правый) — вперёд.
+  // Motor B (right) — forward.
   digitalWrite(MOTOR_BIN1, HIGH);
   digitalWrite(MOTOR_BIN2, LOW);
   analogWrite(MOTOR_PWMB, SPEED);
@@ -55,6 +55,6 @@ void setup() {
 }
 
 void loop() {
-  // Ничего не делаем: моторы уже крутятся, состояние держится само.
+  // Do nothing: the motors are already spinning, the state holds by itself.
   delay(1000);
 }

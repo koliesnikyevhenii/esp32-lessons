@@ -7,8 +7,8 @@
 const char* SSID = "Vektor_04";
 const char* PASS = "uteam2020";
 
-// Все выводы — на одной стороне платы (левая колонка DevKit V1).
-// GPIO12 (strapping-пин) не используем; LDR на GPIO35 = ADC1, работает при активном Wi-Fi.
+// All pins are on one side of the board (left column of the DevKit V1).
+// GPIO12 (a strapping pin) is not used; LDR on GPIO35 = ADC1, works while Wi-Fi is active.
 //              RS  E   D4  D5  D6  D7
 LiquidCrystal lcd(13, 14, 25, 26, 27, 32);
 
@@ -19,7 +19,7 @@ LiquidCrystal lcd(13, 14, 25, 26, 27, 32);
 DHT dht(DHTPIN, DHTTYPE);
 WebServer server(80);
 
-bool page = false;   // false = датчики, true = IP
+bool page = false;   // false = sensors, true = IP
 
 void handleData() {
   float t = dht.readTemperature();
@@ -55,18 +55,18 @@ void loop() {
 
   lcd.clear();
   if (!page) {
-    // страница 1: T / H / свет
+    // page 1: T / H / light
     lcd.setCursor(0, 0);
     lcd.print("T:"); lcd.print(t, 1);
     lcd.print(" H:"); lcd.print(h, 0); lcd.print("%");
     lcd.setCursor(0, 1);
     lcd.print("Light: "); lcd.print(light);
   } else {
-    // страница 2: IP-адрес
+    // page 2: IP address
     lcd.setCursor(0, 0);
     lcd.print("IP address:");
     lcd.setCursor(0, 1);
-    lcd.print(WiFi.localIP());   // IPAddress печатается напрямую
+    lcd.print(WiFi.localIP());   // IPAddress prints directly
   }
   page = !page;
 

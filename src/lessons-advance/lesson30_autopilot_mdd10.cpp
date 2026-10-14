@@ -1,73 +1,73 @@
 // ============================================================================
-//  Этап 7. Автопилот v1 на Cytron MDD10A — урок 30
+//  Stage 7. Autopilot v1 on the Cytron MDD10A — lesson 30
 // ----------------------------------------------------------------------------
-//  Это урок 29 БЕЗ ИЗМЕНЕНИЙ в логике, но с другим драйвером моторов: вместо
-//  TB6612FNG стоит Cytron MDD10A (2 канала, до 10 А на канал, 5..30 В).
-//  Поменялся ровно один слой — функции motor()/driveStop()/driveTank() и setup().
-//  Автопилот, сонар, сервопривод, защита по наклону, топики MQTT — те же байт в
-//  байт, поэтому бэкенд, дашборд и FPV-камера (урок 26) ничего не замечают.
+//  This is lesson 29 with NO CHANGES to the logic, but with a different motor driver:
+//  instead of the TB6612FNG there is a Cytron MDD10A (2 channels, up to 10 A per
+//  channel, 5..30 V). Exactly one layer changed — motor()/driveStop()/driveTank() and
+//  setup(). Autopilot, sonar, servo, tilt guard, MQTT topics are byte-for-byte the
+//  same, so the backend, the dashboard and the FPV camera (lesson 26) notice nothing.
 //
-//  ЧЕМ MDD10A ОТЛИЧАЕТСЯ ОТ TB6612 (для кода):
-//    • на канал ДВА провода, а не три: DIR (направление) и PWM (скорость) —
-//      режим sign-magnitude. Пинов IN1/IN2 больше нет;
-//    • PWM = 0 -> выходы мотора замкнуты на GND, это ТОРМОЗ (у TB6612 при
-//      IN1=IN2=LOW мотор катился по инерции). Машинка останавливается резче —
-//      автопилоту это только на руку (STOP_CM);
-//    • ШИМ до 20 кГц. analogWrite в ядре 2.x даёт 1 кГц — мотор на нём пищит.
-//      Поэтому здесь явный LEDC на 20 кГц (неслышно) — см. раздел МОТОРЫ.
+//  HOW THE MDD10A DIFFERS FROM THE TB6612 (for the code):
+//    • TWO wires per channel, not three: DIR (direction) and PWM (speed) —
+//      sign-magnitude mode. There are no IN1/IN2 pins any more;
+//    • PWM = 0 -> motor outputs are shorted to GND, this is a BRAKE (on the TB6612 with
+//      IN1=IN2=LOW the motor coasted). The car stops harder —
+//      which only helps the autopilot (STOP_CM);
+//    • PWM up to 20 kHz. analogWrite in core 2.x gives 1 kHz — the motor whines on it.
+//      Hence explicit LEDC at 20 kHz here (inaudible) — see the MOTORS section.
 //
-//  ПОДКЛЮЧЕНИЕ (пины — те же провода, что шли на TB6612, см. include/pins.h):
-//    MDD_DIR1 13 / MDD_PWM1 25 — канал 1 = ЛЕВЫЙ мотор (бывшие AIN1 / PWMA)
-//    MDD_DIR2 26 / MDD_PWM2 33 — канал 2 = ПРАВЫЙ мотор (бывшие BIN1 / PWMB)
-//    GND драйвера -> GND ESP32 (ОБЯЗАТЕЛЬНО), силовой вход -> батарея напрямую.
-//    Провода с GPIO14 и GPIO27 (AIN2/BIN2) просто снять — они больше не нужны.
-//    Логика MDD10A понимает 3.3 В, преобразователь уровней не нужен.
-//  Подробно: src/lessons-advance/documentation/lesson30_autopilot_mdd10.md
+//  WIRING (pins — the same wires that went to the TB6612, see include/pins.h):
+//    MDD_DIR1 13 / MDD_PWM1 25 — channel 1 = LEFT motor (formerly AIN1 / PWMA)
+//    MDD_DIR2 26 / MDD_PWM2 33 — channel 2 = RIGHT motor (formerly BIN1 / PWMB)
+//    Driver GND -> ESP32 GND (MANDATORY), power input -> battery directly.
+//    The wires from GPIO14 and GPIO27 (AIN2/BIN2) are simply removed — no longer needed.
+//    MDD10A logic understands 3.3 V, no level shifter needed.
+//  Details: src/lessons-advance/documentation/lesson30_autopilot_mdd10.md
 //
-//  Дальше — описание урока 29, оно целиком в силе.
+//  What follows is the description of lesson 29, it fully applies.
 // ----------------------------------------------------------------------------
-//  Цель: соединить урок 22 (телеметрия + управление по MQTT) и урок 28
-//  (сканирующий сонар) в одну прошивку, где робот умеет ехать без человека:
+//  Goal: combine lesson 22 (telemetry + MQTT control) and lesson 28
+//  (scanning sonar) into one firmware where the robot can drive without a human:
 //
-//      если впереди чисто        -> ехать вперёд
-//      если стена ближе порога   -> остановиться, осмотреться, повернуть
-//      если ответа нет вообще    -> считать это ОПАСНОСТЬЮ, а не свободной дорогой
+//      if the way ahead is clear      -> drive forward
+//      if a wall is closer than limit -> stop, look around, turn
+//      if there is no echo at all     -> treat it as DANGER, not as a free road
 //
-//  Что нового по сравнению с 22 и 28 — три вещи, и все три принципиальные:
+//  What is new compared to 22 and 28 — three things, all three fundamental:
 //
-//  1) СКАНИРОВАНИЕ БОЛЬШЕ НЕ БЛОКИРУЕТ loop(). В уроке 28 sweep() честно стоял
-//     ~2 секунды в delay() — там больше ничего и не происходило. Здесь за эти
-//     2 секунды успели бы: отвалиться keep-alive MQTT, сработать failsafe моторов
-//     (700 мс) и «проспаться» защита по наклону. Поэтому проход развёрнут в
-//     АВТОМАТ СОСТОЯНИЙ: за один проход loop() делается ровно один маленький шаг
-//     (повернуть вал / сделать один «пик»), а между шагами робот продолжает жить.
+//  1) SCANNING NO LONGER BLOCKS loop(). In lesson 28 sweep() honestly sat in delay()
+//     for ~2 seconds — nothing else was happening there anyway. Here, during those
+//     2 seconds, the MQTT keep-alive would drop, the motor failsafe (700 ms) would
+//     fire, and the tilt guard would "sleep through". So the sweep is unrolled into a
+//     STATE MACHINE: one pass of loop() does exactly one small step
+//     (turn the horn / fire one "ping"), and between steps the robot keeps living.
 //
-//  2) ДВА РЕЖИМА И КТО ГЛАВНЫЙ. Появился второй топик команд —
-//     commands/esp32/mode с телом auto|manual. Автопилот включается ИЗ БРАУЗЕРА
-//     и выключается пятью способами: командой manual, ЛЮБОЙ командой движения
-//     (человек взялся за руль — автопилот молча уходит), потерей брокера,
-//     тремя подряд неудачными осмотрами и, конечно, кнопкой в дашборде.
-//     Контракт commands/esp32/drive НЕ тронут: FPV-страница из урока 26 про
-//     автопилот ничего не знает и продолжает работать как была.
+//  2) TWO MODES AND WHO IS IN CHARGE. There is a second command topic —
+//     commands/esp32/mode with body auto|manual. The autopilot is switched on FROM THE
+//     BROWSER and switched off in five ways: the manual command, ANY drive command
+//     (the human grabbed the wheel — the autopilot silently steps aside), loss of the
+//     broker, three failed looks in a row and, of course, the button in the dashboard.
+//     The commands/esp32/drive contract is NOT touched: the FPV page from lesson 26
+//     knows nothing about the autopilot and keeps working as it did.
 //
-//  3) ПОВОРОТ ЗАКРЫТ ПО ГИРОСКОПУ. Энкодеров у нас нет, «крутиться 600 мс» —
-//     это лотерея (заряд батареи, ковёр, паркет). Зато с урока 20 есть yaw, и
-//     поворот идёт до тех пор, пока |yaw - yaw на старте| не наберёт нужные
-//     градусы. Знак yaw при этом не важен (см. serviceTurn) — направление задают
-//     моторы, а гироскоп только считает, сколько уже накрутили. Таймаут на случай,
-//     если колёса буксуют и yaw не растёт.
+//  3) THE TURN IS CLOSED ON THE GYRO. We have no encoders, "spin for 600 ms" is a
+//     lottery (battery charge, carpet, parquet). But since lesson 20 we have yaw, and
+//     the turn goes on until |yaw - yaw at start| accumulates the required degrees.
+//     The sign of yaw does not matter (see serviceTurn) — the direction is set by the
+//     motors, and the gyro only counts how much has been turned so far. A timeout in
+//     case the wheels slip and yaw does not grow.
 //
-//  Телеметрия к уроку 22 добавляет три метрики (контракт тот же — голое число):
-//     sensors/esp32/distance — расстояние по курсу, см; -1 = «эха нет» (НЕ «далеко»!)
-//     sensors/esp32/mode     — 0 = ручной, 1 = автопилот (publish on change)
-//     sensors/esp32/bearing  — угол, который автопилот выбрал последним осмотром,
-//                              в координатах сервопривода: 90 = прямо (on change)
+//  Telemetry adds three metrics to lesson 22 (same contract — a bare number):
+//     sensors/esp32/distance — distance ahead, cm; -1 = "no echo" (NOT "far"!)
+//     sensors/esp32/mode     — 0 = manual, 1 = autopilot (publish on change)
+//     sensors/esp32/bearing  — the angle the autopilot chose on its last look,
+//                              in servo coordinates: 90 = straight ahead (on change)
 //
-//  Пины: MPU (32/17), моторы MDD10A (13/25 и 26/33), сонар (12/39), сервопривод (19).
-//  Четыре периферии ОДНОВРЕМЕННО — именно ради этого группы в pins.h не пересекаются.
+//  Pins: MPU (32/17), MDD10A motors (13/25 and 26/33), sonar (12/39), servo (19).
+//  Four peripherals AT THE SAME TIME — this is exactly why the groups in pins.h don't overlap.
 //
-//  Библиотеки: knolleary/PubSubClient + tockn/MPU6050_tockn
-//  Сборка: pio run -e lesson30_autopilot_mdd10 -t upload && pio device monitor
+//  Libraries: knolleary/PubSubClient + tockn/MPU6050_tockn
+//  Build: pio run -e lesson30_autopilot_mdd10 -t upload && pio device monitor
 // ============================================================================
 
 #include <Arduino.h>
@@ -81,8 +81,8 @@
 const char* SSID = "Vektor_04";
 const char* PASS = "uteam2020";
 
-// ---- MQTT-брокер (RabbitMQ + mqtt-плагин) ---------------------------------
-const char* MQTT_BROKER = "192.168.0.7";   // <-- LAN-IP своего ПК, НЕ localhost
+// ---- MQTT broker (RabbitMQ + mqtt plugin) ---------------------------------
+const char* MQTT_BROKER = "192.168.0.7";   // <-- your PC's LAN IP, NOT localhost
 const uint16_t MQTT_PORT = 1883;
 const char* MQTT_USER = "esp";
 const char* MQTT_PASS = "esp-pass";
@@ -90,51 +90,51 @@ const char* MQTT_PASS = "esp-pass";
 const char* DEVICE_ID = "esp32";
 const char* CLIENT_ID = "esp32-lesson30";
 
-// ---- Топики ----------------------------------------------------------------
+// ---- Topics ----------------------------------------------------------------
 const char* TOPIC_PITCH   = "sensors/esp32/pitch";
 const char* TOPIC_ROLL    = "sensors/esp32/roll";
 const char* TOPIC_YAW     = "sensors/esp32/yaw";
-const char* TOPIC_GUARD   = "sensors/esp32/guard";     // 0/1 — защита по наклону (урок 22)
-const char* TOPIC_DIST    = "sensors/esp32/distance";  // см по курсу, -1 = нет эха
-const char* TOPIC_MODE    = "sensors/esp32/mode";      // 0 ручной / 1 автопилот
-const char* TOPIC_BEARING = "sensors/esp32/bearing";   // выбранный угол, 90 = прямо
+const char* TOPIC_GUARD   = "sensors/esp32/guard";     // 0/1 — tilt guard (lesson 22)
+const char* TOPIC_DIST    = "sensors/esp32/distance";  // cm ahead, -1 = no echo
+const char* TOPIC_MODE    = "sensors/esp32/mode";      // 0 manual / 1 autopilot
+const char* TOPIC_BEARING = "sensors/esp32/bearing";   // chosen angle, 90 = straight ahead
 const char* TOPIC_DRIVE   = "commands/esp32/drive";    // forward|back|left|right|stop
-const char* TOPIC_CMDMODE = "commands/esp32/mode";     // auto|manual  <-- НОВОЕ
+const char* TOPIC_CMDMODE = "commands/esp32/mode";     // auto|manual  <-- NEW
 
-// ---- Датчик ----------------------------------------------------------------
+// ---- Sensor ----------------------------------------------------------------
 MPU6050 mpu(Wire);
 
-// ---- Моторы ----------------------------------------------------------------
-// ШИМ для MDD10A: 20 кГц (максимум по даташиту, выше слуха), 8 бит — чтобы
-// скорости остались в привычных 0..255, как с analogWrite в уроках 21/22/29.
+// ---- Motors ----------------------------------------------------------------
+// PWM for the MDD10A: 20 kHz (datasheet maximum, above hearing), 8 bit — so that
+// speeds stay in the familiar 0..255, as with analogWrite in lessons 21/22/29.
 const uint32_t MOTOR_PWM_HZ   = 20000;
 const uint8_t  MOTOR_PWM_BITS = 8;
 
-// Мотор крутится не в ту сторону? У TB6612 для этого меняли местами провода
-// мотора — можно и здесь (M1A <-> M1B), а можно просто поставить true.
+// Motor spinning the wrong way? With the TB6612 we swapped the motor wires —
+// you can do that here too (M1A <-> M1B), or simply set true.
 const bool MOTOR_LEFT_INVERT  = false;
 const bool MOTOR_RIGHT_INVERT = true;
 
-// MDD10A тянет до 10 А, и резкий реверс «вперёд -> назад» на полном ходу даёт
-// бросок тока, который маленькие моторы и батарея чувствуют. Перед сменой
-// направления мотор на эти миллисекунды получает 0 (тормоз), и только потом DIR
-// меняется. Ожидание НЕ блокирует loop() — см. motorService().
+// The MDD10A delivers up to 10 A, and an abrupt "forward -> back" reversal at full speed
+// produces a current spike that small motors and the battery feel. Before a direction
+// change the motor gets 0 (brake) for these milliseconds, and only then does DIR
+// change. The wait does NOT block loop() — see motorService().
 const uint32_t REVERSE_PAUSE_MS = 30;
 
-const int SPEED_MANUAL = 200;                // как в уроке 22
-// Автопилот ездит МЕДЛЕННЕЕ человека, и это не вежливость, а арифметика из урока 27:
-// сонар даёт ~14 измерений в секунду, то есть между двумя «пиками» робот проезжает
-// вслепую. На 200 это заметный кусок тормозного пути, на 160 — вдвое меньше.
+const int SPEED_MANUAL = 200;                // as in lesson 22
+// The autopilot drives SLOWER than a human, and this is not politeness but arithmetic
+// from lesson 27: the sonar gives ~14 readings per second, so between two "pings" the
+// robot drives blind. At 200 that is a noticeable chunk of braking distance, at 160 — half that.
 const int SPEED_AUTO   = 160;
-const unsigned long FAILSAFE_MS = 700;       // ручной режим: нет команд дольше -> стоп
+const unsigned long FAILSAFE_MS = 700;       // manual mode: no commands for longer -> stop
 
-// ---- Защита по наклону (целиком из урока 22) -------------------------------
+// ---- Tilt guard (entirely from lesson 22) ----------------------------------
 const float TILT_LIMIT   = 45.0f;
 const float TILT_RELEASE = 35.0f;
 const unsigned long TILT_DEBOUNCE_MS = 300;
 const float ACCEL_TRUST_BAND = 0.25f;
 
-// ---- Сервопривод (из урока 28) ---------------------------------------------
+// ---- Servo (from lesson 28) ------------------------------------------------
 const uint32_t SERVO_FREQ_HZ = 50;
 const uint8_t  SERVO_BITS    = 16;
 const uint16_t SERVO_MIN_US  = 500;
@@ -144,51 +144,51 @@ const uint8_t SCAN_MIN_DEG  = 30;
 const uint8_t SCAN_MAX_DEG  = 150;
 const uint8_t SCAN_STEP_DEG = 15;
 const uint8_t SCAN_POINTS   = (SCAN_MAX_DEG - SCAN_MIN_DEG) / SCAN_STEP_DEG + 1;  // 9
-const uint8_t SERVO_FORWARD_DEG = 90;        // «прямо по курсу»
+const uint8_t SERVO_FORWARD_DEG = 90;        // "straight ahead"
 
-// Куда смотрит вал на углах БОЛЬШЕ 90°. Зависит от того, какой стороной надет
-// кронштейн: если робот на осмотре уверенно сворачивает в противоположную сторону
-// от свободного места — поменяй здесь true на false, и больше ничего.
+// Where the horn points at angles GREATER than 90°. Depends on which way round the
+// bracket is mounted: if on a look the robot confidently turns away from the free
+// space — change true to false here, and nothing else.
 const bool SERVO_HIGH_IS_LEFT = true;
 
-const uint32_t SETTLE_MS       = 120;        // шаг 15°: ~25 мс хода + успокоение
-const uint32_t SETTLE_FAR_MS   = 450;        // переезд через весь сектор (90° -> 30°)
+const uint32_t SETTLE_MS       = 120;        // 15° step: ~25 ms of travel + settling
+const uint32_t SETTLE_FAR_MS   = 450;        // move across the whole sector (90° -> 30°)
 
-// ---- Сонар (из урока 27) ---------------------------------------------------
+// ---- Sonar (from lesson 27) ------------------------------------------------
 const float AIR_TEMP_C   = 20.0f;            // v = 331.4 + 0.606*T
 const float MIN_VALID_CM = 2.0f;
 const float MAX_VALID_CM = 400.0f;
 
-// В уроке 27 тайм-аут был 30000 мкс (≈5 м) — и pulseIn честно съедал 30 мс.
-// Здесь это недопустимо: за 30 мс мы не обслужим ни MQTT, ни failsafe. 15000 мкс
-// это ~2.5 м — дальше автопилоту всё равно, «свободно и свободно».
+// In lesson 27 the timeout was 30000 µs (≈5 m) — and pulseIn honestly ate 30 ms.
+// Here that is unacceptable: in 30 ms we service neither MQTT nor the failsafe. 15000 µs
+// is ~2.5 m — beyond that the autopilot doesn't care, "free is free".
 const uint32_t ECHO_TIMEOUT_US = 15000UL;
-const uint32_t PING_GAP_MS     = 70;         // 60 по даташиту + запас
-const uint8_t  PINGS_PER_POINT = 3;          // медиана из 3 (одиночный выброс не сдвинет)
+const uint32_t PING_GAP_MS     = 70;         // 60 per datasheet + margin
+const uint8_t  PINGS_PER_POINT = 3;          // median of 3 (a single outlier won't move it)
 
-// ---- Пороги автопилота -----------------------------------------------------
-// Тормозим НЕ на 20 см из формулировки этапа, а раньше: пока едем, сонар молчит
-// ~70 мс, плюс сама машинка катится по инерции. 30 см — это запас на оба эффекта.
+// ---- Autopilot thresholds --------------------------------------------------
+// We brake NOT at the 20 cm from the stage wording, but earlier: while driving the sonar
+// is silent for ~70 ms, plus the car itself coasts. 30 cm is the margin for both effects.
 const float STOP_CM  = 30.0f;
-// А направление считаем свободным только с 45 см: 31 см «свободы» — это не проезд,
-// это следующая остановка через полсекунды.
+// And a direction counts as free only from 45 cm: 31 cm of "freedom" is not a passage,
+// it is the next stop half a second later.
 const float CLEAR_CM = 45.0f;
 
-// Сколько подряд измерений без эха считать препятствием. Одно «нет эха» в комнате —
-// обычное дело (стена дальше 2.5 м). Четыре подряд на скорости — это уже 0.3 секунды
-// молчания, и по уроку 27 это «не знаю», то есть повод остановиться и осмотреться.
+// How many readings in a row without an echo count as an obstacle. One "no echo" in a
+// room is normal (the wall is further than 2.5 m). Four in a row at speed is already 0.3
+// seconds of silence, and per lesson 27 that is "don't know", i.e. a reason to stop and look.
 const uint8_t UNKNOWN_LIMIT = 4;
 
-const int16_t  TURN_MIN_DEG   = 25;          // меньше поворачивать бессмысленно
-const int16_t  TURN_DEADZONE  = 10;          // выбранный угол почти прямо -> просто ехать
-const uint32_t BACK_MS        = 600;         // сколько пятиться, когда всё занято
-const uint8_t  BLIND_LIMIT    = 3;           // столько безрезультатных осмотров -> сдаёмся
+const int16_t  TURN_MIN_DEG   = 25;          // turning less than this is pointless
+const int16_t  TURN_DEADZONE  = 10;          // chosen angle almost straight -> just drive
+const uint32_t BACK_MS        = 600;         // how long to back up when everything is blocked
+const uint8_t  BLIND_LIMIT    = 3;           // this many fruitless looks -> give up
 
-// ---- Тайминги --------------------------------------------------------------
-const unsigned long PUBLISH_INTERVAL = 200;  // 5 раз в секунду, как в уроке 22
-const unsigned long DIST_STALE_MS    = 1500; // старее -> публикуем -1 («не знаю»)
+// ---- Timings ---------------------------------------------------------------
+const unsigned long PUBLISH_INTERVAL = 200;  // 5 times per second, as in lesson 22
+const unsigned long DIST_STALE_MS    = 1500; // older -> publish -1 ("don't know")
 
-// ---- Состояние: сеть, датчик, защита (урок 22) -----------------------------
+// ---- State: network, sensor, guard (lesson 22) -----------------------------
 unsigned long lastCommandMs = 0;
 unsigned long lastPublish   = 0;
 bool moving      = false;
@@ -200,33 +200,33 @@ float pitch = 0, roll = 0, yaw = 0;
 WiFiClient   net;
 PubSubClient mqtt(net);
 
-// ---- Состояние: сервопривод ------------------------------------------------
-uint8_t  servoAimDeg  = SERVO_FORWARD_DEG;   // куда ПОСЛАН вал
-uint32_t servoReadyAt = 0;                   // когда ему можно верить (доехал и успокоился)
+// ---- State: servo ----------------------------------------------------------
+uint8_t  servoAimDeg  = SERVO_FORWARD_DEG;   // where the horn was SENT
+uint32_t servoReadyAt = 0;                   // when it can be trusted (arrived and settled)
 
-// ---- Состояние: сонар «по курсу» -------------------------------------------
-float    fwdRing[PINGS_PER_POINT];           // последние измерения на 90°
+// ---- State: "ahead" sonar --------------------------------------------------
+float    fwdRing[PINGS_PER_POINT];           // latest readings at 90°
 uint8_t  fwdCount   = 0;
 uint32_t nextPingAt = 0;
-uint8_t  unknownRun = 0;                     // сколько подряд «нет эха»
-float    lastFwdCm  = NAN;                   // последняя ДОСТОВЕРНАЯ дистанция по курсу
+uint8_t  unknownRun = 0;                     // how many "no echo" in a row
+float    lastFwdCm  = NAN;                   // last TRUSTED distance ahead
 uint32_t lastFwdAt  = 0;
 
-// ---- Состояние: автопилот --------------------------------------------------
+// ---- State: autopilot ------------------------------------------------------
 enum AutoState : uint8_t {
-  AUTO_OFF,     // рулит человек
-  AUTO_DRIVE,   // едем вперёд и «пикаем» по курсу
-  AUTO_SCAN,    // стоим и осматриваем сектор (stop and look)
-  AUTO_TURN,    // доворачиваем по гироскопу
-  AUTO_BACK     // пятимся: впереди всё занято
+  AUTO_OFF,     // a human is steering
+  AUTO_DRIVE,   // driving forward and "pinging" ahead
+  AUTO_SCAN,    // standing and looking over the sector (stop and look)
+  AUTO_TURN,    // turning by the gyro
+  AUTO_BACK     // backing up: everything ahead is blocked
 };
 AutoState autoState = AUTO_OFF;
-int modeSent = -1;                           // что про режим уже знает бэкенд
-int bearingSent = -1000;                     // -1000 = ещё ничего не отправляли
-bool autoPaused = false;                     // приостановлены защитой по наклону
-uint8_t blindCount = 0;                      // осмотров подряд без свободного направления
+int modeSent = -1;                           // what the backend already knows about the mode
+int bearingSent = -1000;                     // -1000 = nothing sent yet
+bool autoPaused = false;                     // paused by the tilt guard
+uint8_t blindCount = 0;                      // looks in a row with no free direction
 
-// Проход сектора как автомат: за один loop() — один шаг.
+// Sector sweep as a state machine: one step per loop().
 enum ScanPhase : uint8_t { SCAN_SETTLE, SCAN_PING };
 float    scanBuf[SCAN_POINTS];
 float    pingBuf[PINGS_PER_POINT];
@@ -234,64 +234,65 @@ uint8_t  scanIndex = 0, scanPing = 0, pingCount = 0;
 ScanPhase scanPhase = SCAN_SETTLE;
 uint32_t scanNextAt = 0, scanStartedAt = 0;
 
-// Поворот по гироскопу.
+// Turn by the gyro.
 float    turnStartYaw = 0;
 int16_t  turnGoalDeg  = 0;
 uint32_t turnDeadline = 0;
 
 // ---------------------------------------------------------------------------
-//  МОТОРЫ — Cytron MDD10A. ЕДИНСТВЕННЫЙ раздел, переписанный относительно урока 29.
+//  MOTORS — Cytron MDD10A. The ONLY section rewritten relative to lesson 29.
 //
-//  Режим sign-magnitude: DIR = направление (HIGH/LOW), PWM = скорость (скважность).
-//  PWM = 0 — тормоз (оба выхода канала на GND), а не свободный выбег.
+//  Sign-magnitude mode: DIR = direction (HIGH/LOW), PWM = speed (duty cycle).
+//  PWM = 0 — brake (both channel outputs to GND), not free coasting.
 //
-//  ПРО LEDC. Здесь НЕТ analogWrite: он даёт 1 кГц, а это громкий писк в моторах.
-//  Явный ledcSetup на 20 кГц, каналы CH_MOTOR_L/CH_MOTOR_R = 8/9. Каналы 8..15 в
-//  ядре 2.x — отдельная группа LEDC (low-speed) со своими таймерами, поэтому с
-//  сервоприводом (CH_SERVO 4 -> таймер 2 high-speed группы, 50 Гц) они не делят
-//  таймер и частоты друг другу не сбивают. А делить таймер 20 кГц / 50 Гц нельзя:
-//  кто вызвал ledcSetup последним, тот и задал частоту обоим.
+//  ABOUT LEDC. There is NO analogWrite here: it gives 1 kHz, which is a loud whine in
+//  the motors. Explicit ledcSetup at 20 kHz, channels CH_MOTOR_L/CH_MOTOR_R = 8/9.
+//  Channels 8..15 in core 2.x are a separate LEDC group (low-speed) with their own
+//  timers, so they don't share a timer with the servo (CH_SERVO 4 -> timer 2 of the
+//  high-speed group, 50 Hz) and don't knock each other's frequencies off. And sharing a
+//  timer between 20 kHz / 50 Hz is not allowed: whoever called ledcSetup last set the
+//  frequency for both.
 //
-//  Внешний интерфейс — driveStop()/driveTank(left, right, speed) и флаг moving —
-//  тот же, что в уроке 29, поэтому весь автопилот ниже не тронут.
+//  The external interface — driveStop()/driveTank(left, right, speed) and the moving
+//  flag — is the same as in lesson 29, so the whole autopilot below is untouched.
 // ---------------------------------------------------------------------------
 struct Motor {
   uint8_t  dirPin;
   uint8_t  channel;
   bool     invert;
-  int8_t   wantDir;     // что попросили: -1 / 0 / +1
+  int8_t   wantDir;     // what was requested: -1 / 0 / +1
   uint8_t  wantSpeed;
-  int8_t   runDir;      // в какую сторону мотор крутится ПРЯМО СЕЙЧАС (0 = тормоз)
-  int8_t   lastDir;     // последнее направление, в котором он реально крутился
-  uint32_t brakedAt;    // когда его последний раз остановили
+  int8_t   runDir;      // which way the motor is spinning RIGHT NOW (0 = brake)
+  int8_t   lastDir;     // the last direction it actually spun in
+  uint32_t brakedAt;    // when it was last stopped
 };
 
 Motor motorL = { MDD_DIR1, CH_MOTOR_L, MOTOR_LEFT_INVERT,  0, 0, 0, 0, 0 };
 Motor motorR = { MDD_DIR2, CH_MOTOR_R, MOTOR_RIGHT_INVERT, 0, 0, 0, 0, 0 };
 
-// Привести мотор к тому, что попросили. Вызывается и из driveTank(), и каждый
-// loop() из motorService() — так пауза перед реверсом обходится без delay().
+// Bring the motor to what was requested. Called both from driveTank() and on every
+// loop() from motorService() — this is how the pre-reverse pause works without delay().
 void motorUpdate(Motor& m) {
-  if (m.wantDir == 0) {                       // стоп = тормоз
+  if (m.wantDir == 0) {                       // stop = brake
     if (m.runDir != 0) { m.runDir = 0; m.brakedAt = millis(); }
     ledcWrite(m.channel, 0);
     return;
   }
-  if (m.runDir == m.wantDir) {                // то же направление — меняем только скорость
+  if (m.runDir == m.wantDir) {                // same direction — change only the speed
     ledcWrite(m.channel, m.wantSpeed);
     return;
   }
-  if (m.runDir != 0) {                        // реверс на ходу: сначала затормозить
+  if (m.runDir != 0) {                        // reversing on the move: brake first
     m.runDir   = 0;
     m.brakedAt = millis();
     ledcWrite(m.channel, 0);
-    return;                                   // DIR сменим, когда выйдет пауза
+    return;                                   // DIR is changed once the pause is over
   }
-  // Стоим. Если последний раз крутились в ДРУГУЮ сторону и недавно — ждём.
+  // Standing. If we last spun the OTHER way and recently — wait.
   if (m.lastDir != 0 && m.lastDir != m.wantDir &&
       millis() - m.brakedAt < REVERSE_PAUSE_MS) return;
 
-  // DIR меняем только при PWM = 0 — тогда мотор не дёрнется на полном ходу.
+  // DIR is changed only at PWM = 0 — then the motor won't jerk at full speed.
   bool high = (m.wantDir > 0) != m.invert;
   digitalWrite(m.dirPin, high ? HIGH : LOW);
   ledcWrite(m.channel, m.wantSpeed);
@@ -305,7 +306,7 @@ void motorSet(Motor& m, int dir, int speed) {
   motorUpdate(m);
 }
 
-// Каждый loop(): доводит отложенный реверс до конца.
+// Every loop(): carries a deferred reversal through to the end.
 void motorService() {
   motorUpdate(motorL);
   motorUpdate(motorR);
@@ -324,9 +325,9 @@ void driveTank(int left, int right, int speed) {
 }
 
 // ---------------------------------------------------------------------------
-//  СЕРВОПРИВОД (урок 28). servoRelax() здесь СОЗНАТЕЛЬНО не используется:
-//  сонар должен всё время смотреть строго вперёд, а на едущей машинке отпущенный
-//  вал утащит вибрацией. Платим за это током удержания (~10 мА) и жужжанием.
+//  SERVO (lesson 28). servoRelax() is DELIBERATELY not used here:
+//  the sonar must always face straight ahead, and on a moving car a released
+//  horn gets dragged off by vibration. We pay for it with holding current (~10 mA) and buzzing.
 // ---------------------------------------------------------------------------
 uint32_t usToDuty(uint32_t us) {
   return (uint32_t)(((uint64_t)us * ((1UL << SERVO_BITS) - 1)) / 20000UL);
@@ -338,7 +339,7 @@ void servoWriteDeg(float deg) {
   ledcWrite(CH_SERVO, usToDuty(us));
 }
 
-// Навести вал и запомнить, когда ему снова можно верить: ПОВЕРНУТЬ -> ПОДОЖДАТЬ -> МЕРИТЬ.
+// Aim the horn and remember when it can be trusted again: TURN -> WAIT -> MEASURE.
 void servoAim(uint8_t deg, uint32_t settleMs) {
   servoWriteDeg(deg);
   servoAimDeg  = deg;
@@ -350,8 +351,8 @@ bool servoSettled() {
 }
 
 // ---------------------------------------------------------------------------
-//  СОНАР (урок 27). NAN = ответа нет. Это ТРЕТЬЕ состояние, а не «далеко»:
-//  так же выглядит стена под углом, штора и отвалившийся по питанию датчик.
+//  SONAR (lesson 27). NAN = no response. This is a THIRD state, not "far":
+//  an angled wall, a curtain and a sensor that lost power all look the same.
 // ---------------------------------------------------------------------------
 float pingCm() {
   digitalWrite(SONAR_TRIG, LOW);
@@ -368,10 +369,10 @@ float pingCm() {
   return cm;
 }
 
-// Медиана; NAN, если валидных меньше двух — «одно измерение из трёх» доверия не стоит.
+// Median; NAN if fewer than two are valid — "one reading out of three" isn't worth trusting.
 float medianOf(float* v, uint8_t n) {
   if (n < 2) return NAN;
-  for (uint8_t i = 1; i < n; i++) {          // сортировка вставками, элементов единицы
+  for (uint8_t i = 1; i < n; i++) {          // insertion sort, only a handful of elements
     float key = v[i];
     int8_t j = i - 1;
     while (j >= 0 && v[j] > key) { v[j + 1] = v[j]; j--; }
@@ -385,7 +386,7 @@ uint8_t angleAt(uint8_t index) {
 }
 
 // ---------------------------------------------------------------------------
-//  ТЕЛЕМЕТРИЯ (контракт урока 19: тело = голое число)
+//  TELEMETRY (lesson 19 contract: body = bare number)
 // ---------------------------------------------------------------------------
 void publishNumber(const char* topic, float value) {
   char buf[16];
@@ -393,7 +394,7 @@ void publishNumber(const char* topic, float value) {
   mqtt.publish(topic, buf);
 }
 
-// guard/mode/bearing — СОБЫТИЯ, а не поток измерений: шлём только при изменении.
+// guard/mode/bearing are EVENTS, not a stream of measurements: sent only on change.
 void publishGuardIfChanged() {
   int state = tiltBlocked ? 1 : 0;
   if (state == guardSent) return;
@@ -419,17 +420,17 @@ void publishBearing(int16_t deg) {
   Serial.printf("[MQTT] -> %s = %d\n", TOPIC_BEARING, deg);
 }
 
-// Дистанция по курсу. -1 — это «не знаю»: либо эха нет, либо измерение протухло
-// (идёт осмотр, вал смотрит вбок). Дашборд обязан рисовать -1 как «нет эха», а не
-// как ноль сантиметров и не как «свободно».
+// Distance ahead. -1 means "don't know": either there is no echo, or the reading is stale
+// (a look is in progress, the horn faces sideways). The dashboard must draw -1 as "no echo",
+// not as zero centimetres and not as "free".
 void publishDistance() {
   bool fresh = !isnan(lastFwdCm) && (millis() - lastFwdAt) <= DIST_STALE_MS;
   publishNumber(TOPIC_DIST, fresh ? lastFwdCm : -1.0f);
 }
 
 // ---------------------------------------------------------------------------
-//  ЗАЩИТА ПО НАКЛОНУ — без изменений из урока 22 (два фильтра, оба нужны:
-//  подробности там же, в комментарии к функции).
+//  TILT GUARD — unchanged from lesson 22 (two filters, both needed:
+//  details are there, in the function's comment).
 // ---------------------------------------------------------------------------
 void updateTiltGuard(float accelG) {
   if (fabsf(accelG - 1.0f) > ACCEL_TRUST_BAND) return;
@@ -457,17 +458,17 @@ void updateTiltGuard(float accelG) {
 }
 
 // ---------------------------------------------------------------------------
-//  АВТОПИЛОТ: включение/выключение
+//  AUTOPILOT: on/off
 // ---------------------------------------------------------------------------
-void beginScan();   // ниже
+void beginScan();   // below
 
 void setAutopilot(bool on, const char* why) {
   if (on == (autoState != AUTO_OFF)) return;
 
   driveStop();
   if (on) {
-    // Начинаем ВСЕГДА с осмотра, а не с езды: мы понятия не имеем, что перед
-    // носом, а «поехали и разберёмся» — это ровно тот автопилот, который врезается.
+    // ALWAYS start with a look, not with driving: we have no idea what is in front
+    // of our nose, and "let's go and figure it out" is exactly the autopilot that crashes.
     blindCount = 0;
     autoPaused = false;
     autoState  = AUTO_SCAN;
@@ -475,19 +476,19 @@ void setAutopilot(bool on, const char* why) {
     Serial.printf("\n[AUTO] ВКЛЮЧЁН (%s) — сначала осмотреться\n", why);
   } else {
     autoState = AUTO_OFF;
-    servoAim(SERVO_FORWARD_DEG, SETTLE_FAR_MS);   // вернуть сонар по курсу
+    servoAim(SERVO_FORWARD_DEG, SETTLE_FAR_MS);   // point the sonar back ahead
     Serial.printf("[AUTO] выключен (%s)\n", why);
   }
   publishModeIfChanged();
 }
 
 // ---------------------------------------------------------------------------
-//  АВТОПИЛОТ: осмотр сектора одним шагом за loop()
+//  AUTOPILOT: sector look, one step per loop()
 //
-//  Это и есть главное отличие от урока 28. Там sweep() стоял в delay() два
-//  раза по секунде; здесь каждый вызов делает МИНИМУМ работы и сразу возвращает
-//  управление, а «сколько ещё ждать» живёт в scanNextAt. Единственное, что всё
-//  ещё блокирует, — сам pulseIn (до 15 мс), и это физика, а не код.
+//  This is the main difference from lesson 28. There sweep() sat in delay() for two
+//  one-second stretches; here each call does the MINIMUM of work and immediately returns
+//  control, and "how much longer to wait" lives in scanNextAt. The only thing that
+//  still blocks is pulseIn itself (up to 15 ms), and that is physics, not code.
 // ---------------------------------------------------------------------------
 void beginScan() {
   for (uint8_t i = 0; i < SCAN_POINTS; i++) scanBuf[i] = NAN;
@@ -496,35 +497,35 @@ void beginScan() {
   pingCount = 0;
   scanPhase = SCAN_SETTLE;
   scanStartedAt = millis();
-  servoAim(angleAt(0), SETTLE_FAR_MS);   // с 90° на 30° — это переезд, не шаг
+  servoAim(angleAt(0), SETTLE_FAR_MS);   // from 90° to 30° is a long move, not a step
   scanNextAt = servoReadyAt;
 }
 
-// true = проход закончен, результат в scanBuf.
+// true = sweep finished, result in scanBuf.
 bool serviceScan() {
   uint32_t now = millis();
   if ((int32_t)(now - scanNextAt) < 0) return false;
 
   if (scanPhase == SCAN_SETTLE) {
-    // Вал доехал и успокоился — начинаем серию «пиков» на этом угле.
+    // The horn has arrived and settled — start a series of "pings" at this angle.
     scanPhase = SCAN_PING;
     scanPing  = 0;
     pingCount = 0;
   }
 
-  // Ровно ОДИН «пик» за проход loop().
+  // Exactly ONE "ping" per pass of loop().
   float cm = pingCm();
   if (!isnan(cm)) pingBuf[pingCount++] = cm;
   scanPing++;
 
-  // Точка 90° — заодно свежая дистанция по курсу для телеметрии.
+  // The 90° point — also a fresh distance ahead for telemetry.
   if (!isnan(cm) && angleAt(scanIndex) == SERVO_FORWARD_DEG) {
     lastFwdCm = cm;
     lastFwdAt = now;
   }
 
   if (scanPing < PINGS_PER_POINT) {
-    scanNextAt = now + PING_GAP_MS;      // даташит: не чаще раза в 60 мс
+    scanNextAt = now + PING_GAP_MS;      // datasheet: no more often than once per 60 ms
     return false;
   }
 
@@ -538,7 +539,7 @@ bool serviceScan() {
   return false;
 }
 
-// Печать сектора «радаром» — то же, что в уроке 28, но одной строкой на точку.
+// Print the sector as a "radar" — same as in lesson 28, but one line per point.
 void printScan() {
   Serial.println("--------- осмотр ---------------------------");
   for (uint8_t i = 0; i < SCAN_POINTS; i++) {
@@ -553,20 +554,20 @@ void printScan() {
 }
 
 // ---------------------------------------------------------------------------
-//  АВТОПИЛОТ: поворот по гироскопу
+//  AUTOPILOT: turn by the gyro
 //
-//  Знак yaw НЕ важен: направление задают моторы, а гироскоп только меряет, сколько
-//  уже накрутили — поэтому берём модуль разности. Это заодно избавляет от вопроса
-//  «в какую сторону считает ось Z у конкретно этой платы».
-//  Таймаут — на случай, когда yaw не растёт: колесо буксует, робот упёрся,
-//  датчик отвалился. Тогда просто прекращаем и идём осматриваться заново.
+//  The sign of yaw does NOT matter: the direction is set by the motors, and the gyro
+//  only measures how much has been turned so far — so we take the absolute difference.
+//  This also removes the question "which way does the Z axis count on this particular board".
+//  The timeout is for when yaw doesn't grow: a wheel slips, the robot is stuck,
+//  the sensor dropped out. Then we simply stop and go look around again.
 // ---------------------------------------------------------------------------
 void beginTurn(int16_t deg, bool left) {
   turnGoalDeg   = deg;
   turnStartYaw  = yaw;
-  turnDeadline  = millis() + 400 + (uint32_t)deg * 25;   // с большим запасом
-  servoAim(SERVO_FORWARD_DEG, SETTLE_MS);                // сонар — по курсу
-  driveTank(left ? -1 : +1, left ? +1 : -1, SPEED_AUTO); // танковый разворот на месте
+  turnDeadline  = millis() + 400 + (uint32_t)deg * 25;   // with a large margin
+  servoAim(SERVO_FORWARD_DEG, SETTLE_MS);                // sonar — straight ahead
+  driveTank(left ? -1 : +1, left ? +1 : -1, SPEED_AUTO); // tank-style spin in place
   autoState = AUTO_TURN;
   Serial.printf("[AUTO] поворот %s на %d град\n", left ? "ВЛЕВО" : "ВПРАВО", deg);
 }
@@ -581,14 +582,14 @@ void serviceTurn() {
   if (timeout && !done)
     Serial.printf("[AUTO] поворот по таймауту: накрутили %.0f из %d град "
                   "(буксуем? упёрлись?)\n", turned, turnGoalDeg);
-  // После поворота — снова осмотр. «Повернулся и поехал» означало бы ехать по
-  // данным, снятым до поворота, то есть по старому миру.
+  // After a turn — look again. "Turned and drove off" would mean driving on
+  // data taken before the turn, i.e. on the old world.
   autoState = AUTO_SCAN;
   beginScan();
 }
 
 // ---------------------------------------------------------------------------
-//  АВТОПИЛОТ: решение по итогам осмотра
+//  AUTOPILOT: decision based on the look
 // ---------------------------------------------------------------------------
 void decideAfterScan() {
   printScan();
@@ -600,19 +601,19 @@ void decideAfterScan() {
   }
 
   if (best < 0) {
-    // Ни одного свободного направления. Это НЕ «кругом чисто» — это либо угол,
-    // либо мы стоим носом в диван, который сонар не слышит. Пятимся и смотрим снова.
+    // Not a single free direction. This is NOT "all clear around" — it is either a corner,
+    // or we are standing nose-first in a sofa the sonar can't hear. Back up and look again.
     blindCount++;
     Serial.printf("[AUTO] свободных направлений нет (попытка %u из %u) — назад\n",
                   blindCount, BLIND_LIMIT);
     if (blindCount >= BLIND_LIMIT) {
-      // Сдаёмся честно: глохнем и сообщаем бэкенду mode=0, чтобы в дашборде тумблер
-      // сам погас. Робот, который «как-то выберется», выберется через плинтус.
+      // Give up honestly: shut down and report mode=0 to the backend, so the toggle in the
+      // dashboard switches off by itself. A robot that "will get out somehow" gets out through the skirting board.
       setAutopilot(false, "три осмотра подряд без свободного направления");
       return;
     }
     driveTank(-1, -1, SPEED_AUTO);
-    turnDeadline = millis() + BACK_MS;   // переиспользуем как «до каких пор пятиться»
+    turnDeadline = millis() + BACK_MS;   // reused as "until when to back up"
     autoState = AUTO_BACK;
     return;
   }
@@ -621,7 +622,7 @@ void decideAfterScan() {
   int16_t bearingDeg = angleAt(best);
   publishBearing(bearingDeg);
 
-  int16_t delta = bearingDeg - (int16_t)SERVO_FORWARD_DEG;   // >0 — в сторону «больших» углов
+  int16_t delta = bearingDeg - (int16_t)SERVO_FORWARD_DEG;   // >0 — towards the "larger" angles
   Serial.printf("[AUTO] свободнее всего %d° (%.0f см)\n", bearingDeg, scanBuf[best]);
 
   if (abs(delta) <= TURN_DEADZONE) {
@@ -640,7 +641,7 @@ void decideAfterScan() {
 }
 
 // ---------------------------------------------------------------------------
-//  АВТОПИЛОТ: езда вперёд с «пиками» по курсу
+//  AUTOPILOT: driving forward with "pings" ahead
 // ---------------------------------------------------------------------------
 void serviceDrive() {
   uint32_t now = millis();
@@ -649,8 +650,8 @@ void serviceDrive() {
 
   float cm = pingCm();
   if (isnan(cm)) {
-    // «Нет эха» — это не «свободно». Но и не паника: одно молчание в комнате
-    // означает всего лишь «дальше 2.5 м». Считаем ПОДРЯД ИДУЩИЕ молчания.
+    // "No echo" is not "free". But it is not panic either: a single silence in a room
+    // merely means "further than 2.5 m". Count CONSECUTIVE silences.
     if (++unknownRun >= UNKNOWN_LIMIT) {
       Serial.printf("[AUTO] %u измерений подряд без эха — это «не знаю», тормозим\n", unknownRun);
       driveStop();
@@ -670,7 +671,7 @@ void serviceDrive() {
   float buf[PINGS_PER_POINT];
   memcpy(buf, fwdRing, sizeof(float) * fwdCount);
   float median = medianOf(buf, fwdCount);
-  if (isnan(median)) return;                 // ещё не набрали три — едем дальше
+  if (isnan(median)) return;                 // haven't collected three yet — keep driving
 
   if (median <= STOP_CM) {
     Serial.printf("[AUTO] стена в %.0f см (порог %.0f) — стоп, осмотреться\n", median, STOP_CM);
@@ -681,20 +682,20 @@ void serviceDrive() {
 }
 
 // ---------------------------------------------------------------------------
-//  АВТОПИЛОТ: один шаг автомата за проход loop()
+//  AUTOPILOT: one state-machine step per pass of loop()
 // ---------------------------------------------------------------------------
 void serviceAutopilot() {
   if (autoState == AUTO_OFF) return;
 
-  // Защита по наклону главнее автопилота: пока машинка задрана — стоим.
+  // The tilt guard outranks the autopilot: while the car is tipped up — stand still.
   if (tiltBlocked) {
     if (moving) driveStop();
     autoPaused = true;
     return;
   }
   if (autoPaused) {
-    // Отпустило. Мир за это время мог измениться (нас, например, сняли с препятствия
-    // и поставили в другую сторону) — поэтому не продолжаем, а смотрим заново.
+    // Released. The world may have changed meanwhile (we may, for example, have been lifted
+    // off the obstacle and set down facing elsewhere) — so we don't resume, we look again.
     autoPaused = false;
     autoState  = AUTO_SCAN;
     beginScan();
@@ -729,12 +730,12 @@ void serviceAutopilot() {
 }
 
 // ---------------------------------------------------------------------------
-//  КОМАНДЫ
+//  COMMANDS
 // ---------------------------------------------------------------------------
 void applyCommand(const String& cmd) {
-  // Сначала РАЗБИРАЕМ команду и только потом что-то делаем. Порядок важен: ниже
-  // распознанная команда выключает автопилот, и мусор в топике не должен получить
-  // такое право — «стоп» по опечатке в чужом клиенте это не остановка, а авария.
+  // First PARSE the command, and only then do anything. The order matters: below, a
+  // recognised command turns the autopilot off, and garbage in the topic must not get
+  // that right — a "stop" from a typo in someone else's client is not a stop, it's an accident.
   int left, right;
   if      (cmd == "stop")    { left =  0; right =  0; }
   else if (cmd == "forward") { left = +1; right = +1; }
@@ -743,12 +744,12 @@ void applyCommand(const String& cmd) {
   else if (cmd == "right")   { left = +1; right = -1; }
   else { Serial.printf("[DRIVE] неизвестная команда '%s'\n", cmd.c_str()); return; }
 
-  // Человек взялся за руль -> автопилот молча уходит. Это не «ошибка», а
-  // нормальный способ его выключить: сработает и кнопка в дашборде, и геймпад,
-  // и D-pad на FPV-странице из урока 26, которая про автопилот ничего не знает.
+  // The human grabbed the wheel -> the autopilot silently steps aside. This is not an
+  // "error" but the normal way to switch it off: the dashboard button, a gamepad,
+  // and the D-pad on the FPV page from lesson 26, which knows nothing about the autopilot, all work.
   if (autoState != AUTO_OFF) setAutopilot(false, "ручная команда — человек взялся за руль");
 
-  // «Стоп» исполняем ВСЕГДА, даже при активной защите: стоп безопасен по определению.
+  // "Stop" is ALWAYS executed, even with the guard active: stop is safe by definition.
   if (left == 0 && right == 0) { driveStop(); return; }
 
   if (tiltBlocked) {
@@ -776,24 +777,24 @@ void onMessage(char* topic, byte* payload, unsigned int length) {
 
   if (strcmp(topic, TOPIC_CMDMODE) == 0) { applyMode(body); return; }
 
-  lastCommandMs = millis();   // failsafe ручного режима
+  lastCommandMs = millis();   // manual-mode failsafe
   applyCommand(body);
 }
 
 void reconnect() {
   while (!mqtt.connected()) {
-    // Автопилот БЕЗ связи ездить не должен. Не потому, что ему нужны команды — он
-    // как раз самостоятельный, — а потому, что без брокера его нечем остановить:
-    // ни кнопкой в дашборде, ни телеметрией не видно, что он делает.
+    // The autopilot must NOT drive without a connection. Not because it needs commands — it
+    // is self-sufficient precisely — but because without the broker there is nothing to stop it
+    // with: neither the dashboard button nor telemetry shows what it is doing.
     if (autoState != AUTO_OFF) setAutopilot(false, "потеряна связь с брокером");
 
     Serial.print("[MQTT] Подключение к брокеру... ");
     if (mqtt.connect(CLIENT_ID, MQTT_USER, MQTT_PASS)) {
       Serial.println("OK");
-      mqtt.subscribe(TOPIC_DRIVE, 1);      // QoS 1 — команды важнее телеметрии
+      mqtt.subscribe(TOPIC_DRIVE, 1);      // QoS 1 — commands matter more than telemetry
       mqtt.subscribe(TOPIC_CMDMODE, 1);
       Serial.printf("[MQTT] Подписки: '%s', '%s' (QoS 1)\n", TOPIC_DRIVE, TOPIC_CMDMODE);
-      // После реконнекта заново сообщим бэкенду состояние всех «событийных» метрик.
+      // After reconnecting, report the state of all "event" metrics to the backend again.
       guardSent   = -1;
       modeSent    = -1;
       bearingSent = -1000;
@@ -809,9 +810,9 @@ void reconnect() {
 void setup() {
   Serial.begin(115200);
 
-  // 1) МОТОРЫ — первым делом стоп: дальше три секунды калибровки гироскопа.
-  //    Порядок: сначала PWM-канал с нулём, потом DIR — чтобы ни на миг не
-  //    оказалось «скорость есть, направление случайное».
+  // 1) MOTORS — stop first of all: three seconds of gyro calibration follow.
+  //    Order: first the PWM channel at zero, then DIR — so that there is never, even
+  //    for an instant, "speed present, direction random".
   ledcSetup(CH_MOTOR_L, MOTOR_PWM_HZ, MOTOR_PWM_BITS);
   ledcSetup(CH_MOTOR_R, MOTOR_PWM_HZ, MOTOR_PWM_BITS);
   ledcWrite(CH_MOTOR_L, 0);
@@ -824,20 +825,20 @@ void setup() {
   digitalWrite(MDD_DIR2, LOW);
   driveStop();
 
-  // 2) СОНАР (урок 27)
+  // 2) SONAR (lesson 27)
   pinMode(SONAR_TRIG, OUTPUT);
   digitalWrite(SONAR_TRIG, LOW);
-  pinMode(SONAR_ECHO, INPUT);          // GPIO39 — вход-only, линию держит делитель
+  pinMode(SONAR_ECHO, INPUT);          // GPIO39 — input-only, the divider holds the line
 
-  // 3) СЕРВОПРИВОД (урок 28): 50 Гц, 16 бит, канал 4 (таймер 2).
+  // 3) SERVO (lesson 28): 50 Hz, 16 bit, channel 4 (timer 2).
   ledcSetup(CH_SERVO, SERVO_FREQ_HZ, SERVO_BITS);
   ledcAttachPin(SERVO_PIN, CH_SERVO);
   servoAim(SERVO_FORWARD_DEG, SETTLE_FAR_MS);
-  delay(600);                           // в setup() блокировать ещё можно
+  delay(600);                           // blocking is still fine in setup()
   Serial.println("\n=== Урок 30. Автопилот v1 на Cytron MDD10A ===");
   Serial.println("сонар смотрит на 90° — проверь, что он смотрит СТРОГО ВПЕРЁД");
 
-  // 4) I2C + MPU6050 (уроки 20/22)
+  // 4) I2C + MPU6050 (lessons 20/22)
   Wire.begin(MPU_SDA, MPU_SCL);
   Wire.setClock(400000);
   Serial.print("[MPU] Инициализация... ");
@@ -864,12 +865,12 @@ void setup() {
 }
 
 void loop() {
-  // 1) Связь. Без mqtt.loop() не работают ни подписки, ни keep-alive.
+  // 1) Connection. Without mqtt.loop() neither subscriptions nor keep-alive work.
   if (!mqtt.connected()) reconnect();
   mqtt.loop();
 
-  // 2) Датчик — каждую итерацию: так точнее интеграл гироскопа, а на нём держится
-  //    поворот автопилота.
+  // 2) Sensor — every iteration: this makes the gyro integral more accurate, and the
+  //    autopilot's turn relies on it.
   mpu.update();
   float ax = mpu.getAccX(), ay = mpu.getAccY(), az = mpu.getAccZ();
   roll  = atan2f(ay, az) * 180.0f / PI;
@@ -878,30 +879,30 @@ void loop() {
 
   updateTiltGuard(sqrtf(ax * ax + ay * ay + az * az));
 
-  // 3) Автопилот — ровно один шаг автомата. Ничего блокирующего, кроме pulseIn.
+  // 3) Autopilot — exactly one state-machine step. Nothing blocking except pulseIn.
   serviceAutopilot();
 
-  // 3a) Моторы: довести отложенный реверс (пауза REVERSE_PAUSE_MS без delay).
+  // 3a) Motors: complete a deferred reversal (REVERSE_PAUSE_MS pause without delay).
   motorService();
 
-  // 4) Сонар «по курсу» в РУЧНОМ режиме. Нужен не автопилоту, а человеку: дашборд
-  //    показывает дистанцию и предупреждает о стене, пока рулят руками.
-  //    В AUTO_DRIVE этим занимается serviceDrive(), во время осмотра вал смотрит
-  //    вбок — тогда мерить «по курсу» нечем.
+  // 4) "Ahead" sonar in MANUAL mode. Needed not by the autopilot but by the human: the
+  //    dashboard shows the distance and warns about a wall while steering by hand.
+  //    In AUTO_DRIVE serviceDrive() takes care of this; during a look the horn faces
+  //    sideways — then there is nothing to measure "ahead" with.
   if (autoState == AUTO_OFF && servoSettled() && (int32_t)(millis() - nextPingAt) >= 0) {
     nextPingAt = millis() + PING_GAP_MS;
     float cm = pingCm();
     if (!isnan(cm)) { lastFwdCm = cm; lastFwdAt = millis(); }
   }
 
-  // 5) Failsafe урока 21/22 — ТОЛЬКО в ручном режиме. В автопилоте команд нет по
-  //    определению, и этот таймер заглушил бы его через 700 мс после старта.
+  // 5) Failsafe from lessons 21/22 — ONLY in manual mode. In autopilot there are no commands
+  //    by definition, and this timer would kill it 700 ms after the start.
   if (autoState == AUTO_OFF && moving && millis() - lastCommandMs > FAILSAFE_MS) {
     Serial.println("[DRIVE] failsafe: команд нет, стоп");
     driveStop();
   }
 
-  // 6) Телеметрия раз в PUBLISH_INTERVAL мс, без блокирующего delay.
+  // 6) Telemetry once per PUBLISH_INTERVAL ms, without a blocking delay.
   unsigned long now = millis();
   if (now - lastPublish >= PUBLISH_INTERVAL) {
     lastPublish = now;

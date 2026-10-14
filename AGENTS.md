@@ -8,7 +8,7 @@ A PlatformIO project of incremental ESP32 learning exercises (Arduino framework)
 
 Default board: `esp32dev` (ESP32-WROOM-32 DevKit) — **except the camera lessons 23–26**, which
 run on an ESP32-**S3**-CAM and override the board (and PSRAM/USB settings) via `extends = cam_s3`
-in their env (see below). Serial monitor baud: `115200`. Code comments are in Russian; pin/lesson labels and identifiers are English.
+in their env (see below). Serial monitor baud: `115200`. **Code comments must be in English only** (in `.cpp`/`.h`/`platformio.ini`) — never write new comments in Russian. Pin/lesson labels and identifiers are English too. User-facing string literals (Serial output, web pages) and the `documentation/` notes may stay in Russian.
 
 ## Layout
 

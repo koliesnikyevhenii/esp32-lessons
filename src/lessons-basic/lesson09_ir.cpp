@@ -9,7 +9,7 @@ void setup() {
 }
 
 void loop() {
-  // у большинства модулей: LOW = препятствие обнаружено
+  // on most modules: LOW = obstacle detected
   if (digitalRead(IR) == LOW) {
     digitalWrite(LED_GREEN, HIGH);
     Serial.println("Препятствие");

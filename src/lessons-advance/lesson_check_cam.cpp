@@ -1,84 +1,86 @@
 // ============================================================================
-//  CHECK: ESP32-S3-CAM (OV2640) — проверка камеры перед уроком 23
+//  CHECK: ESP32-S3-CAM (OV2640) — camera check before lesson 23
 // ----------------------------------------------------------------------------
-//  Цель: убедиться, что модуль камеры живой и кадры реально снимаются, ДО того
-//  как подмешивать Wi-Fi и веб-сервер (уроки 23-26). Никакой сети — только
-//  esp_camera + Serial. Тот же принцип, что у lesson_check_mpu и
-//  lesson_check_tb6612: сначала железо, потом протоколы.
+//  Goal: make sure the camera module is alive and frames are actually captured
+//  BEFORE mixing in Wi-Fi and a web server (lessons 23-26). No network — just
+//  esp_camera + Serial. Same principle as lesson_check_mpu and
+//  lesson_check_tb6612: hardware first, protocols later.
 //
-//  ВАЖНО: это ДРУГАЯ ПЛАТА И ДРУГОЙ ЧИП. Уроки 02-22 собирались под
-//  ESP32-WROOM-32 DevKit (board = esp32dev), камерные — под HW-679 ESP32-S3-CAM
-//  (ESP32-S3-WROOM-1 N16R8, board = esp32-s3-devkitc-1 + memory_type = qio_opi).
-//  У S3 USB-C НАТИВНЫЙ: перемычка GPIO0 на GND не нужна, прошивка и монитор идут
-//  по одному кабелю. Если upload не стартует — зажать BOOT, коротко нажать RST.
-//  Подробности: documentation/esp32cam_hardware.md
+//  IMPORTANT: this is a DIFFERENT BOARD AND A DIFFERENT CHIP. Lessons 02-22 were
+//  built for the ESP32-WROOM-32 DevKit (board = esp32dev), the camera ones for the
+//  HW-679 ESP32-S3-CAM (ESP32-S3-WROOM-1 N16R8, board = esp32-s3-devkitc-1 +
+//  memory_type = qio_opi). On the S3 the USB-C is NATIVE: no GPIO0-to-GND jumper
+//  is needed, flashing and the monitor go over one cable. If upload doesn't
+//  start — hold BOOT, briefly press RST.
+//  Details: documentation/esp32cam_hardware.md
 //
-//  Что делает:
-//    - печатает модель чипа, объём и тип PSRAM (от неё зависит разрешение);
-//    - инициализирует камеру (esp_camera_init) и печатает модель сенсора;
-//    - раз в секунду снимает кадр и печатает разрешение + размер JPEG в байтах
-//      (а если сенсор без аппаратного JPEG — ещё и время программного сжатия);
-//    - если пин подсветки неизвестен (CAM_FLASH_LED = -1), включает «охоту за
-//      LED»: по очереди мигает безопасными GPIO и пишет, каким именно. Смотри на
-//      плату — какой мигнул, тот и вписывай в include/pins.h.
+//  What it does:
+//    - prints the chip model, PSRAM size and type (the resolution depends on it);
+//    - initialises the camera (esp_camera_init) and prints the sensor model;
+//    - once a second captures a frame and prints the resolution + JPEG size in bytes
+//      (and if the sensor has no hardware JPEG — also the software compression time);
+//    - if the flash LED pin is unknown (CAM_FLASH_LED = -1), runs an "LED
+//      hunt": blinks the safe GPIOs one by one and prints which one. Watch the
+//      board — whichever one blinked, put that into include/pins.h.
 //
-//  Как читать вывод:
-//    - "[SYS] PSRAM: найдена, 8192 КБ" -> memory_type в platformio.ini угадан верно;
-//    - "[SYS] PSRAM: НЕ найдена" на модуле N16R8 -> неверный memory_type
-//      (для octal-PSRAM нужен qio_opi, для quad — qio_qspi);
-//    - "[CAM] init OK" + строка "сенсор PID ..." -> шлейф вставлен верно.
-//      PID 0x0026 = OV2640 (умеет аппаратный JPEG), PID 0x2145 = GC2145 (не
-//      умеет — тогда скетч сам переключается на RGB565 + frame2jpg, и строка
-//      "[CAM] режим:" скажет, как именно он работает);
-//    - "кадр 640x480, 23456 байт" -> камера снимает;
-//    - размер JPEG "дышит" при смене освещения -> это нормально: степень сжатия
-//      зависит от картинки, чем больше деталей и шума, тем больше байт;
-//    - init FAILED 0x20001 (ESP_ERR_CAMERA_NOT_DETECTED) -> шлейф не защёлкнут
-//      до конца, вставлен другой стороной, или выбрана не та CAM_MODEL_* в pins.h;
-//    - монитор вообще пустой -> на плате UART-мост, а не нативный USB: поставь
-//      -DARDUINO_USB_CDC_ON_BOOT=0 в platformio.ini (см. комментарий там).
+//  How to read the output:
+//    - "[SYS] PSRAM: найдена, 8192 КБ" -> memory_type in platformio.ini is right;
+//    - "[SYS] PSRAM: НЕ найдена" on an N16R8 module -> wrong memory_type
+//      (octal PSRAM needs qio_opi, quad needs qio_qspi);
+//    - "[CAM] init OK" + the line "сенсор PID ..." -> the ribbon is seated correctly.
+//      PID 0x0026 = OV2640 (has hardware JPEG), PID 0x2145 = GC2145 (doesn't —
+//      then the sketch switches to RGB565 + frame2jpg by itself, and the line
+//      "[CAM] режим:" will tell exactly how it works);
+//    - "кадр 640x480, 23456 байт" -> the camera is capturing;
+//    - JPEG size "breathes" when the lighting changes -> that's normal: the
+//      compression ratio depends on the picture, the more detail and noise, the more bytes;
+//    - init FAILED 0x20001 (ESP_ERR_CAMERA_NOT_DETECTED) -> the ribbon isn't latched
+//      all the way, is inserted the wrong way round, or the wrong CAM_MODEL_* is
+//      selected in pins.h;
+//    - the monitor is completely empty -> the board has a UART bridge, not native USB:
+//      set -DARDUINO_USB_CDC_ON_BOOT=0 in platformio.ini (see the comment there).
 //
-//  Сборка/прошивка:
+//  Build/flash:
 //    pio run -e lesson_check_cam -t upload
 //    pio device monitor
 //
-//  Пины камеры — в include/pins.h (блок CAM_*, выбор модели через CAM_MODEL_*).
-//  Мы их НЕ выбираем: шлейф сенсора разведён на плате жёстко.
+//  Camera pins are in include/pins.h (CAM_* block, model chosen via CAM_MODEL_*).
+//  We do NOT choose them: the sensor ribbon is hard-wired on the board.
 // ============================================================================
 
 #include <Arduino.h>
 #include "esp_camera.h"
-#include "img_converters.h"   // frame2jpg(): сжатие RGB565 -> JPEG для сенсоров без аппаратного JPEG
+#include "img_converters.h"   // frame2jpg(): RGB565 -> JPEG compression for sensors without hardware JPEG
 #include "pins.h"
 
-// ---- Настройки съёмки ------------------------------------------------------
-// jpeg_quality: 0..63, МЕНЬШЕ = лучше картинка и БОЛЬШЕ байт (это счётчик
-// грубости сжатия, а не проценты). 10-12 — обычный рабочий диапазон.
+// ---- Capture settings ------------------------------------------------------
+// jpeg_quality: 0..63, LOWER = better picture and MORE bytes (it's a measure
+// of compression coarseness, not a percentage). 10-12 is the usual working range.
 const int JPEG_QUALITY = 12;
-const unsigned long SHOT_INTERVAL = 1000;   // мс между кадрами в этом тесте
+const unsigned long SHOT_INTERVAL = 1000;   // ms between frames in this test
 
-// «Охота за LED»: имеет смысл только пока пин подсветки не найден.
-// Список — заведомо свободные GPIO HW-679. Камерные, USB (19/20), UART0 (43/44),
-// strapping (0/45/46) и линии flash/PSRAM (26..37) сюда не попадают СПЕЦИАЛЬНО.
+// "LED hunt": only makes sense while the flash LED pin hasn't been found.
+// The list is GPIOs known to be free on the HW-679. Camera, USB (19/20), UART0 (43/44),
+// strapping (0/45/46) and flash/PSRAM lines (26..37) are left out ON PURPOSE.
 const int LED_CANDIDATES[] = { 1, 2, 3, 14, 21, 47, 48 };
 
 unsigned long lastShot       = 0;
-unsigned long frames         = 0;   // сколько кадров снято всего
-unsigned long framesInWindow = 0;   // сколько снято за текущее 10-секундное окно
+unsigned long frames         = 0;   // total frames captured
+unsigned long framesInWindow = 0;   // frames captured in the current 10-second window
 unsigned long lastFpsPrint   = 0;
 bool cameraReady = false;
-// Умеет ли сенсор отдавать готовый JPEG. OV2640 — да, GC2145 (наша плата) — нет,
-// и тогда камера работает в RGB565, а сжимает кадр процессор. См. initCamera().
+// Whether the sensor can output a ready JPEG. OV2640 — yes, GC2145 (our board) — no,
+// and then the camera runs in RGB565 and the CPU compresses the frame. See initCamera().
 bool sensorHasJpeg = false;
 
 // ---------------------------------------------------------------------------
-//  Подсветка. У AI-Thinker белый LED жёстко на GPIO4, а у S3-плат разводка
-//  гуляет, поэтому по умолчанию CAM_FLASH_LED = -1 и весь этот код просто не
-//  компилируется. Найдёшь свой пин — впиши в pins.h, и он оживёт сам.
+//  Flash LED. On the AI-Thinker the white LED is hard-wired to GPIO4, but S3 boards
+//  vary in wiring, so by default CAM_FLASH_LED = -1 and all this code simply
+//  doesn't compile. Once you find your pin — put it into pins.h and it comes alive by itself.
 // ---------------------------------------------------------------------------
 void flashInit() {
 #if CAM_FLASH_LED >= 0
-  ledcSetup(CH_CAM_FLASH, 5000, 8);            // 5 кГц, 8 бит (0..255)
+  ledcSetup(CH_CAM_FLASH, 5000, 8);            // 5 kHz, 8 bit (0..255)
   ledcAttachPin(CAM_FLASH_LED, CH_CAM_FLASH);
   ledcWrite(CH_CAM_FLASH, 0);
 #endif
@@ -102,8 +104,8 @@ void statusLed(bool on) {
 }
 
 // ---------------------------------------------------------------------------
-//  Перебор кандидатов: мигаем каждым по 3 раза и пишем, каким именно. Смотри на
-//  плату. Пины взяты только из свободных, так что «дёрнуть» их безопасно.
+//  Going through the candidates: blink each one 3 times and print which one. Watch the
+//  board. The pins are taken only from the free ones, so toggling them is safe.
 // ---------------------------------------------------------------------------
 void huntForLed() {
   Serial.println("\n[LED] Пин подсветки не задан (CAM_FLASH_LED = -1).");
@@ -117,7 +119,7 @@ void huntForLed() {
       digitalWrite(pin, HIGH); delay(180);
       digitalWrite(pin, LOW);  delay(180);
     }
-    // Возвращаем пин в высокоимпедансное состояние — вдруг он всё-таки чей-то.
+    // Return the pin to high impedance — in case it belongs to something after all.
     pinMode(pin, INPUT);
     delay(500);
   }
@@ -126,53 +128,53 @@ void huntForLed() {
 }
 
 // ---------------------------------------------------------------------------
-//  Заполняем структуру конфигурации камеры.
-//  Никакой магии: перечисляем, к каким GPIO подключён сенсор, и в каком виде
-//  хотим получать кадры.
+//  Filling in the camera configuration struct.
+//  No magic: we list which GPIOs the sensor is connected to, and in what form
+//  we want to receive frames.
 // ---------------------------------------------------------------------------
 bool initCamera() {
-  camera_config_t cfg = {};      // сначала обнуляем структуру целиком
+  camera_config_t cfg = {};      // first zero the whole struct
 
-  // 1) Пины. Шина данных у камеры ПАРАЛЛЕЛЬНАЯ (8 бит D0..D7 плюс три строба),
-  //    поэтому пинов так много — это не I2C-датчик на двух проводах.
-  cfg.pin_pwdn     = CAM_PWDN;     // -1 = линии на плате нет
+  // 1) Pins. The camera's data bus is PARALLEL (8 bits D0..D7 plus three strobes),
+  //    which is why there are so many pins — this is not a two-wire I2C sensor.
+  cfg.pin_pwdn     = CAM_PWDN;     // -1 = the board has no such line
   cfg.pin_reset    = CAM_RESET;
   cfg.pin_xclk     = CAM_XCLK;
-  cfg.pin_sccb_sda = CAM_SIOD;     // SCCB = "почти I2C", по нему настраивается сенсор
+  cfg.pin_sccb_sda = CAM_SIOD;     // SCCB = "almost I2C", the sensor is configured over it
   cfg.pin_sccb_scl = CAM_SIOC;
   cfg.pin_d7 = CAM_Y9;  cfg.pin_d6 = CAM_Y8;  cfg.pin_d5 = CAM_Y7;  cfg.pin_d4 = CAM_Y6;
   cfg.pin_d3 = CAM_Y5;  cfg.pin_d2 = CAM_Y4;  cfg.pin_d1 = CAM_Y3;  cfg.pin_d0 = CAM_Y2;
-  cfg.pin_vsync = CAM_VSYNC;       // строб "начался новый кадр"
-  cfg.pin_href  = CAM_HREF;        // строб "идёт строка"
-  cfg.pin_pclk  = CAM_PCLK;        // строб "готов очередной пиксель"
+  cfg.pin_vsync = CAM_VSYNC;       // strobe "a new frame has started"
+  cfg.pin_href  = CAM_HREF;        // strobe "a line is in progress"
+  cfg.pin_pclk  = CAM_PCLK;        // strobe "the next pixel is ready"
 
-  // 2) Тактирование сенсора. XCLK 20 МГц — стандарт для OV2640. Генерирует его
-  //    сам ESP32 через LEDC (да, тот же PWM-модуль, что крутил RGB в уроке 3):
-  //    камера занимает LEDC_TIMER_0 + LEDC_CHANNEL_0, поэтому подсветку выше
-  //    вешаем на канал 7 (CH_CAM_FLASH), чтобы не отобрать у камеры таймер.
-  //    У S3 драйвер умеет режим EDMA на 16 МГц (быстрее, но помечен как
-  //    экспериментальный) — если захочешь попробовать, поставь 16000000.
+  // 2) Sensor clock. XCLK 20 MHz is the standard for the OV2640. It is generated
+  //    by the ESP32 itself via LEDC (yes, the same PWM module that drove the RGB in lesson 3):
+  //    the camera takes LEDC_TIMER_0 + LEDC_CHANNEL_0, so the flash LED above
+  //    goes on channel 7 (CH_CAM_FLASH), so as not to take the timer from the camera.
+  //    On the S3 the driver supports an EDMA mode at 16 MHz (faster, but marked as
+  //    experimental) — if you want to try it, set 16000000.
   cfg.xclk_freq_hz = 20000000;
   cfg.ledc_timer   = LEDC_TIMER_0;
   cfg.ledc_channel = LEDC_CHANNEL_0;
 
-  // 3) Формат кадра. PIXFORMAT_JPEG = сенсор отдаёт УЖЕ СЖАТЫЙ кадр. Это
-  //    принципиально: VGA в RGB565 — это 640*480*2 = 614 400 байт, а в JPEG —
-  //    20-40 КБ. Без сжатия поток в браузер не влез бы ни в RAM, ни в Wi-Fi.
+  // 3) Frame format. PIXFORMAT_JPEG = the sensor outputs an ALREADY COMPRESSED frame. This
+  //    is fundamental: VGA in RGB565 is 640*480*2 = 614 400 bytes, while in JPEG it's
+  //    20-40 KB. Without compression a stream to the browser would fit in neither RAM nor Wi-Fi.
   //
-  //    НО аппаратный JPEG есть не у всех сенсоров: OV2640 умеет, GC2145 (стоит
-  //    на нашей плате) — нет, и esp_camera_init с PIXFORMAT_JPEG у него падает
-  //    с ESP_ERR_NOT_SUPPORTED (0x106). Поэтому пробуем JPEG, а при отказе
-  //    переинициализируемся в RGB565 — дальше кадр сожмёт frame2jpg (урок 23).
+  //    BUT not every sensor has hardware JPEG: the OV2640 does, the GC2145 (fitted
+  //    on our board) doesn't, and esp_camera_init with PIXFORMAT_JPEG fails on it
+  //    with ESP_ERR_NOT_SUPPORTED (0x106). So we try JPEG, and on refusal
+  //    re-initialise in RGB565 — after that frame2jpg compresses the frame (lesson 23).
   cfg.pixel_format = PIXFORMAT_JPEG;
   cfg.jpeg_quality = JPEG_QUALITY;
 
-  // 4) Разрешение и буферы зависят от наличия PSRAM. У N16R8 её 8 МБ — можно
-  //    смело брать VGA и два буфера (и вообще вплоть до UXGA, см. урок 25).
-  //    Без PSRAM кадр должен уместиться во внутреннюю RAM — только QVGA.
+  // 4) Resolution and buffers depend on whether PSRAM is present. The N16R8 has 8 MB —
+  //    we can safely take VGA and two buffers (and in fact up to UXGA, see lesson 25).
+  //    Without PSRAM the frame must fit in internal RAM — QVGA only.
   if (psramFound()) {
     cfg.frame_size  = FRAMESIZE_VGA;         // 640x480
-    cfg.fb_count    = 2;                     // двойная буферизация: снимаем и отдаём параллельно
+    cfg.fb_count    = 2;                     // double buffering: capture and hand off in parallel
     cfg.fb_location = CAMERA_FB_IN_PSRAM;
   } else {
     cfg.frame_size  = FRAMESIZE_QVGA;        // 320x240
@@ -180,9 +182,9 @@ bool initCamera() {
     cfg.fb_location = CAMERA_FB_IN_DRAM;
   }
 
-  // CAMERA_GRAB_WHEN_EMPTY — заполнять буфер, когда он освободился (экономно).
-  // CAMERA_GRAB_LATEST — всегда отдавать самый свежий кадр; для стрима это
-  // важнее (урок 24), иначе видео отстаёт на fb_count кадров.
+  // CAMERA_GRAB_WHEN_EMPTY — fill a buffer when it has been freed (economical).
+  // CAMERA_GRAB_LATEST — always return the freshest frame; for a stream this
+  // matters more (lesson 24), otherwise the video lags by fb_count frames.
   cfg.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
 
   esp_err_t err = esp_camera_init(&cfg);
@@ -192,11 +194,11 @@ bool initCamera() {
   }
 
   if (err == ESP_ERR_NOT_SUPPORTED) {
-    // Сенсор нашёлся, но JPEG не умеет. Не ошибка железа — просто другой чип.
+    // The sensor was found but can't do JPEG. Not a hardware fault — just a different chip.
     Serial.println("[CAM] сенсор не умеет аппаратный JPEG — переключаюсь на RGB565");
     cfg.pixel_format = PIXFORMAT_RGB565;
     if (psramFound()) {
-      cfg.frame_size = FRAMESIZE_QVGA;    // RGB565 весит в разы больше JPEG
+      cfg.frame_size = FRAMESIZE_QVGA;    // RGB565 is many times heavier than JPEG
     }
     err = esp_camera_init(&cfg);
     if (err == ESP_OK) {
@@ -214,8 +216,8 @@ bool initCamera() {
 }
 
 // ---------------------------------------------------------------------------
-//  Кто именно к нам подключён. В ядре есть таблица сенсоров: по id из
-//  esp_camera_sensor_get() достаём имя и максимальное разрешение.
+//  Who exactly is connected. The core has a sensor table: using the id from
+//  esp_camera_sensor_get() we get the name and the maximum resolution.
 // ---------------------------------------------------------------------------
 void printSensorInfo() {
   sensor_t* s = esp_camera_sensor_get();
@@ -236,15 +238,15 @@ void printSensorInfo() {
 
 void setup() {
   Serial.begin(115200);
-  // У нативного USB порт поднимается не мгновенно: без паузы первые строки
-  // теряются, и монитор кажется пустым. На UART-мосте эта задержка не мешает.
+  // With native USB the port doesn't come up instantly: without a pause the first lines
+  // are lost and the monitor looks empty. On a UART bridge this delay does no harm.
   delay(1500);
   Serial.println("\n=== CHECK ESP32-S3-CAM ===");
 
-  statusLed(true);        // горит, пока идёт инициализация (если LED вообще есть)
+  statusLed(true);        // on while initialisation runs (if there is an LED at all)
   flashInit();
 
-  // Чип и память. PSRAM — главный вопрос: без неё нет ни VGA, ни двух буферов.
+  // Chip and memory. PSRAM is the main question: without it there's neither VGA nor two buffers.
   Serial.printf("[SYS] чип %s, ядер %d, ревизия %d\n",
                 ESP.getChipModel(), ESP.getChipCores(), ESP.getChipRevision());
   if (psramFound()) {
@@ -269,7 +271,7 @@ void setup() {
   printSensorInfo();
 
 #if CAM_FLASH_LED >= 0
-  // Короткая проверка подсветки: ~20% яркости на 200 мс.
+  // Quick flash LED check: ~20% brightness for 200 ms.
   Serial.printf("[CAM] проверка подсветки (GPIO %d)...\n", CAM_FLASH_LED);
   flashSet(50);
   delay(200);
@@ -288,7 +290,7 @@ void loop() {
   if (millis() - lastShot < SHOT_INTERVAL) return;
   lastShot = millis();
 
-  // Снять кадр. Возвращается УКАЗАТЕЛЬ на буфер внутри драйвера, а не копия.
+  // Capture a frame. What's returned is a POINTER to a buffer inside the driver, not a copy.
   unsigned long t0 = millis();
   camera_fb_t* fb = esp_camera_fb_get();
   if (!fb) {
@@ -304,17 +306,17 @@ void loop() {
   if (sensorHasJpeg) {
     Serial.printf("[CAM] кадр #%lu: %ux%u, JPEG %u байт, снят за %lu мс\n",
                   frames, w, h, raw_len, grab_ms);
-    // ОБЯЗАТЕЛЬНО вернуть буфер драйверу. Забудешь — через fb_count кадров
-    // esp_camera_fb_get() начнёт возвращать NULL, и камера "сломается".
+    // You MUST return the buffer to the driver. Forget it — and after fb_count frames
+    // esp_camera_fb_get() starts returning NULL, and the camera "breaks".
     esp_camera_fb_return(fb);
   } else {
-    // Сырой кадр сжимаем сами — и заодно меряем, во что это обходится.
+    // We compress the raw frame ourselves — and measure what it costs along the way.
     uint8_t* jpg = nullptr;
     size_t   jpg_len = 0;
     unsigned long t1 = millis();
     bool ok = frame2jpg(fb, 80, &jpg, &jpg_len);
     unsigned long enc_ms = millis() - t1;
-    esp_camera_fb_return(fb);           // сырой кадр больше не нужен
+    esp_camera_fb_return(fb);           // the raw frame is no longer needed
 
     if (!ok) {
       Serial.println("[CAM] frame2jpg не смогла сжать кадр (мало памяти?)");
@@ -323,7 +325,7 @@ void loop() {
     Serial.printf("[CAM] кадр #%lu: %ux%u, RGB565 %u байт -> JPEG %u байт "
                   "(снят за %lu мс, сжат за %lu мс)\n",
                   frames, w, h, raw_len, (unsigned)jpg_len, grab_ms, enc_ms);
-    free(jpg);                          // буфер от frame2jpg наш
+    free(jpg);                          // the frame2jpg buffer is ours
   }
 
   if (millis() - lastFpsPrint >= 10000) {

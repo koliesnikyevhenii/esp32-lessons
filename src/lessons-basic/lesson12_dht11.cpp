@@ -2,9 +2,9 @@
 #include <DHT.h>
 #include "pins.h"
 
-// Lesson 12: DHT11 — температура и влажность.
-// Схема: VCC -> 3.3V, GND -> GND, DATA -> GPIO16 (DHT_PIN).
-// Требуется библиотека adafruit/DHT sensor library (см. lib_deps в platformio.ini).
+// Lesson 12: DHT11 — temperature and humidity.
+// Wiring: VCC -> 3.3V, GND -> GND, DATA -> GPIO16 (DHT_PIN).
+// Requires the adafruit/DHT sensor library (see lib_deps in platformio.ini).
 
 #define DHTTYPE DHT11
 DHT dht(DHT_PIN, DHTTYPE);
@@ -22,5 +22,5 @@ void loop() {
   } else {
     Serial.printf("T=%.1f C  H=%.1f %%\n", t, h);
   }
-  delay(2000);   // DHT11 нельзя опрашивать чаще ~1 раза в секунду
+  delay(2000);   // DHT11 must not be polled more often than ~once per second
 }

@@ -1,66 +1,66 @@
 // ============================================================================
-//  Этап 6. Камера — урок 23: один кадр по HTTP (фотоаппарат в браузере)
+//  Stage 6. Camera — lesson 23: a single frame over HTTP (a camera in the browser)
 // ----------------------------------------------------------------------------
-//  Цель: получить с камеры ОДИН кадр и показать его в браузере. Это тот же
-//  веб-сервер, что в уроке 17 (WebServer + server.on), только вместо HTML со
-//  температурой мы отдаём JPEG-байты.
+//  Goal: grab ONE frame from the camera and show it in the browser. This is the
+//  same web server as in lesson 17 (WebServer + server.on), except that instead
+//  of HTML with a temperature we send JPEG bytes.
 //
-//     Браузер --HTTP GET /jpg--> ESP32-CAM --> esp_camera_fb_get() --> JPEG
+//     Browser --HTTP GET /jpg--> ESP32-CAM --> esp_camera_fb_get() --> JPEG
 //
-//  Почему начинаем с кадра, а не сразу со стрима: пока картинка одна, видно
-//  весь цикл целиком — снять, отдать, вернуть буфер. Стрим (урок 24) — это
-//  просто тот же цикл в бесконечном while.
+//  Why start with a single frame rather than a stream right away: with one
+//  picture the whole cycle is visible — capture, send, return the buffer. A stream
+//  (lesson 24) is just the same cycle inside an endless while.
 //
-//  Что изучаем:
-//    - esp_camera_fb_get() / esp_camera_fb_return() — жизненный цикл кадра;
-//    - frame2jpg() — программное сжатие: на нашей плате стоит сенсор GC2145,
-//      а он, в отличие от OV2640, JPEG сам не умеет (проверяется lesson_check_cam:
-//      "сенсор PID 0x2145 (GC2145), JPEG: нет");
-//    - Content-Type: image/jpeg и setContentLength() — как отдать БИНАРНЫЕ данные
-//      (server.send() умеет только текст, поэтому пишем в клиента напрямую);
-//    - кеш браузера: без ?t=<время> вторая картинка приедет из кеша, а не с камеры;
-//    - "видео из фотографий": страница может дёргать /jpg по кругу — получится
-//      2-4 кадра в секунду. Больше не выйдет, и в уроке 24 разберём почему.
+//  What we learn:
+//    - esp_camera_fb_get() / esp_camera_fb_return() — the frame lifecycle;
+//    - frame2jpg() — software compression: our board carries a GC2145 sensor,
+//      and unlike the OV2640 it cannot do JPEG itself (checked by lesson_check_cam:
+//      "sensor PID 0x2145 (GC2145), JPEG: no");
+//    - Content-Type: image/jpeg and setContentLength() — how to send BINARY data
+//      (server.send() only handles text, so we write to the client directly);
+//    - browser cache: without ?t=<time> the second picture comes from the cache, not the camera;
+//    - "video from photos": the page can poll /jpg in a loop — that gives
+//      2-4 frames per second. No more than that, and lesson 24 explains why.
 //
-//  Страница отдаёт:
-//    /            HTML: картинка, кнопка "Снять", галочка "непрерывно", вспышка
-//    /jpg         один кадр JPEG
-//    /flash?v=0..255  яркость вспышки (PWM)
-//    /info        текстовая статистика (разрешение, размер кадра, RAM, RSSI)
+//  The page serves:
+//    /            HTML: picture, "Capture" button, "continuous" checkbox, flash
+//    /jpg         a single JPEG frame
+//    /flash?v=0..255  flash brightness (PWM)
+//    /info        text statistics (resolution, frame size, RAM, RSSI)
 //
-//  Сборка/прошивка (сначала прогони lesson_check_cam!):
+//  Build/flash (run lesson_check_cam first!):
 //    pio run -e lesson23_cam_snapshot -t upload
-//    pio device monitor        # в мониторе напечатается IP -> открой в браузере
+//    pio device monitor        # the monitor prints the IP -> open it in the browser
 //
-//  Плата: HW-679 ESP32-S3-CAM (board = esp32-s3-devkitc-1 + memory_type = qio_opi),
-//  НЕ DevKit. Пины — include/pins.h (блок CAM_*).
+//  Board: HW-679 ESP32-S3-CAM (board = esp32-s3-devkitc-1 + memory_type = qio_opi),
+//  NOT the DevKit. Pins — include/pins.h (the CAM_* block).
 // ============================================================================
 
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WebServer.h>
 #include "esp_camera.h"
-#include "img_converters.h"   // frame2jpg(): программное сжатие RGB565 -> JPEG
+#include "img_converters.h"   // frame2jpg(): software RGB565 -> JPEG compression
 #include "pins.h"
 
 // ---- Wi-Fi ----------------------------------------------------------------
 const char* SSID = "Vektor_04";
 const char* PASS = "uteam2020";
 
-// Сенсор на этой плате — GC2145, аппаратного JPEG у него НЕТ (в отличие от
-// OV2640): esp_camera_init с PIXFORMAT_JPEG падает с ESP_ERR_NOT_SUPPORTED.
-// Поэтому снимаем сырой RGB565 и жмём в JPEG сами, процессором.
-// Осторожно: у frame2jpg качество 0..100 и БОЛЬШЕ = лучше (у сенсора наоборот).
-const int JPEG_QUALITY = 80;          // 0..100, больше = лучше картинка и больше байт
+// The sensor on this board is a GC2145, and it has NO hardware JPEG (unlike the
+// OV2640): esp_camera_init with PIXFORMAT_JPEG fails with ESP_ERR_NOT_SUPPORTED.
+// So we capture raw RGB565 and compress it to JPEG ourselves, on the CPU.
+// Careful: frame2jpg quality is 0..100 and HIGHER = better (the sensor's is the reverse).
+const int JPEG_QUALITY = 80;          // 0..100, higher = better picture and more bytes
 
 WebServer server(80);
 bool cameraReady = false;
 unsigned long shots = 0;
 
 // ---------------------------------------------------------------------------
-//  Подсветка и индикатор. На S3-платах их пины не стандартизованы, поэтому в
-//  pins.h они по умолчанию -1 и весь этот код просто не компилируется
-//  (см. «охоту за LED» в lesson_check_cam).
+//  Flash light and status indicator. On S3 boards their pins are not standardised,
+//  so in pins.h they default to -1 and all of this code simply doesn't compile
+//  (see the "LED hunt" in lesson_check_cam).
 // ---------------------------------------------------------------------------
 void flashInit() {
 #if CAM_FLASH_LED >= 0
@@ -88,8 +88,8 @@ void statusLed(bool on) {
 }
 
 // ---------------------------------------------------------------------------
-//  Инициализация камеры — тот же код, что в lesson_check_cam (уроки в этом
-//  проекте самодостаточны, поэтому копия, а не общий модуль).
+//  Camera initialisation — the same code as in lesson_check_cam (lessons in this
+//  project are self-contained, hence a copy rather than a shared module).
 // ---------------------------------------------------------------------------
 bool initCamera() {
   camera_config_t cfg = {};
@@ -109,11 +109,11 @@ bool initCamera() {
   cfg.ledc_timer   = LEDC_TIMER_0;
   cfg.ledc_channel = LEDC_CHANNEL_0;
 
-  cfg.pixel_format = PIXFORMAT_RGB565;   // сырой кадр: 2 байта на пиксель
-  cfg.jpeg_quality = 12;                 // при RGB565 не используется, но поле должно быть валидным
+  cfg.pixel_format = PIXFORMAT_RGB565;   // raw frame: 2 bytes per pixel
+  cfg.jpeg_quality = 12;                 // unused with RGB565, but the field must be valid
 
   if (psramFound()) {
-    cfg.frame_size  = FRAMESIZE_VGA;      // 640x480 = 614 КБ на буфер — только в PSRAM
+    cfg.frame_size  = FRAMESIZE_VGA;      // 640x480 = 614 KB per buffer — PSRAM only
     cfg.fb_count    = 2;
     cfg.fb_location = CAMERA_FB_IN_PSRAM;
   } else {
@@ -132,12 +132,12 @@ bool initCamera() {
 }
 
 // ---------------------------------------------------------------------------
-//  Страница. Держим её в R"HTML(...)HTML" — так можно писать вёрстку как есть,
-//  без экранирования кавычек.
+//  The page. We keep it in R"HTML(...)HTML" — that way the markup can be written
+//  as is, without escaping quotes.
 //
-//  Ключевая деталь — ?t=Date.now() в src. Браузер кеширует картинки по URL;
-//  без уникального параметра он покажет ту же самую первую фотографию и никуда
-//  не пойдёт. Тот же приём понадобится всюду, где URL один, а данные меняются.
+//  The key detail is ?t=Date.now() in src. The browser caches images by URL;
+//  without a unique parameter it shows the very same first photo and never makes
+//  a request. The same trick is needed wherever the URL stays fixed but the data changes.
 // ---------------------------------------------------------------------------
 const char PAGE_HTML[] PROGMEM = R"HTML(
 <!doctype html><html lang="ru"><head><meta charset="utf-8">
@@ -183,15 +183,15 @@ void handleRoot() {
 }
 
 // ---------------------------------------------------------------------------
-//  Главный обработчик: снять кадр и отдать его как JPEG.
+//  Main handler: capture a frame and send it as JPEG.
 //
-//  server.send() кладёт в тело СТРОКУ, а в JPEG есть нулевые байты — строкой
-//  его не передать. Поэтому: объявляем длину, отправляем пустое тело с нужными
-//  заголовками, а байты пишем в TCP-сокет напрямую через client.write().
+//  server.send() puts a STRING in the body, and JPEG contains zero bytes — it can't
+//  be sent as a string. So: declare the length, send an empty body with the right
+//  headers, and write the bytes straight into the TCP socket via client.write().
 //
-//  Кадр приезжает сырым (RGB565), поэтому между «снять» и «отдать» появился
-//  третий шаг — frame2jpg(). Буфер под JPEG она выделяет сама, и его НУЖНО
-//  free(). Это и есть цена отсутствия аппаратного JPEG: сжатие ест процессор.
+//  The frame arrives raw (RGB565), so a third step appears between "capture" and
+//  "send" — frame2jpg(). It allocates the JPEG buffer itself, and that buffer MUST be
+//  free()d. This is the price of having no hardware JPEG: compression eats CPU.
 // ---------------------------------------------------------------------------
 void handleJpg() {
   camera_fb_t* fb = esp_camera_fb_get();
@@ -208,7 +208,7 @@ void handleJpg() {
   bool ok = frame2jpg(fb, JPEG_QUALITY, &jpg, &jpg_len);
   unsigned long enc_ms = millis() - t0;
 
-  // Кадр драйверу возвращаем сразу: JPEG уже лежит в отдельном буфере.
+  // Return the frame to the driver right away: the JPEG is already in a separate buffer.
   esp_camera_fb_return(fb);
 
   if (!ok) {
@@ -218,7 +218,7 @@ void handleJpg() {
   }
 
   shots++;
-  // Запрещаем кеширование и на стороне сервера — плюс к ?t= на клиенте.
+  // Forbid caching on the server side too — in addition to ?t= on the client.
   server.sendHeader("Cache-Control", "no-store");
   server.setContentLength(jpg_len);
   server.send(200, "image/jpeg", "");
@@ -229,14 +229,14 @@ void handleJpg() {
   Serial.printf("[HTTP] кадр #%lu: %ux%u, JPEG %u байт (сжатие %lu мс, отправлено %u)\n",
                 shots, w, h, (unsigned)jpg_len, enc_ms, (unsigned)sent);
 
-  // Буфер от frame2jpg наш — освободить ОБЯЗАТЕЛЬНО, иначе через десяток
-  // кадров кончится куча и сервер молча перестанет отвечать.
+  // The frame2jpg buffer is ours — freeing it is MANDATORY, otherwise after a dozen
+  // frames the heap runs out and the server silently stops responding.
   free(jpg);
 }
 
 // ---------------------------------------------------------------------------
-//  Вспышка. PWM, а не digitalWrite: светодиод очень яркий и заметно греется.
-//  Если пин не задан (CAM_FLASH_LED = -1), эндпоинт остаётся, но ничего не делает.
+//  Flash. PWM rather than digitalWrite: the LED is very bright and gets noticeably hot.
+//  If the pin is not set (CAM_FLASH_LED = -1), the endpoint stays but does nothing.
 // ---------------------------------------------------------------------------
 void handleFlash() {
   int v = server.hasArg("v") ? server.arg("v").toInt() : 0;
@@ -261,7 +261,7 @@ void handleInfo() {
 
 void setup() {
   Serial.begin(115200);
-  delay(1500);      // нативному USB нужно время подняться, иначе первые строки теряются
+  delay(1500);      // native USB needs time to come up, otherwise the first lines are lost
   Serial.println("\n=== Урок 23. Кадр с ESP32-S3-CAM по HTTP ===");
 
   statusLed(true);
@@ -286,12 +286,12 @@ void setup() {
   server.on("/info",  handleInfo);
   server.begin();
 
-  statusLed(false);                           // погасили: всё поднялось
+  statusLed(false);                           // turned it off: everything is up
 }
 
 void loop() {
-  // WebServer синхронный: он обрабатывает запрос ровно здесь, внутри loop().
-  // Пока handleJpg() снимает и отправляет кадр, ничего другого не происходит —
-  // именно это ограничение и заставит нас в уроке 24 перейти на esp_http_server.
+  // WebServer is synchronous: it handles a request right here, inside loop().
+  // While handleJpg() captures and sends a frame, nothing else happens —
+  // exactly this limitation is what makes us switch to esp_http_server in lesson 24.
   server.handleClient();
 }

@@ -20,7 +20,7 @@ void loop() {
 
     lcd.setCursor(6, 1);
     lcd.print(millis() / 1000);
-    lcd.print("   "); // затираем старые цифры
+    lcd.print("   "); // overwrite the old digits
 
     pos++;
     if (pos > text.length() - 16)

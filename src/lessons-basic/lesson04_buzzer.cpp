@@ -1,7 +1,7 @@
 #include <Arduino.h>
 #include "pins.h"
 
-// Lesson 4: простой бипер — включаем/выключаем пищалку через digitalWrite.
+// Lesson 4: simple beeper — turn the buzzer on/off with digitalWrite.
 
 void setup() {
   pinMode(BUZZER, OUTPUT);

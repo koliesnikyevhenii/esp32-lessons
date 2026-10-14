@@ -1,23 +1,23 @@
 // ============================================================================
-//  Этап 2. IoT Foundation — урок 20: MPU6050 -> угол наклона (pitch/roll)
+//  Stage 2. IoT Foundation — lesson 20: MPU6050 -> tilt angle (pitch/roll)
 // ----------------------------------------------------------------------------
-//  Цель: снять с гироскопа-акселерометра MPU6050 ускорения по осям X/Y/Z,
-//  вычислить угол наклона (pitch/roll) и отправить его на .NET-бэкенд по MQTT.
+//  Goal: read X/Y/Z accelerations from the MPU6050 gyro-accelerometer,
+//  compute the tilt angle (pitch/roll) and send it to the .NET backend over MQTT.
 //
 //      ESP32 --MQTT(1883)--> RabbitMQ --AMQP--> .NET Worker --> PostgreSQL
 //                                                    |
-//                                              SignalR -> React-дашборд (pitch/roll/yaw)
+//                                              SignalR -> React dashboard (pitch/roll/yaw)
 //
-//  Продолжение урока 19. MQTT-часть та же (publish бодрым числом), меняется
-//  только источник данных: вместо DHT11 — датчик MPU6050 по шине I2C.
+//  A continuation of lesson 19. The MQTT part is the same (publish a bare number),
+//  only the data source changes: instead of the DHT11 — an MPU6050 sensor on the I2C bus.
 //
-//  Что нового по сравнению с уроком 19:
-//    • I2C — читаем датчик по двум проводам (SDA/SCL), адрес 0x68;
-//    • акселерометр — ускорения ax/ay/az (в m/s^2), из них — угол наклона;
-//    • pitch/roll — угол по формулам atan2 (наклон «вперёд-назад» и «вбок»);
-//    • публикуем чаще (5 раз в секунду) — дашборд рисует «почти в реальном времени».
+//  What's new compared to lesson 19:
+//    • I2C — we read the sensor over two wires (SDA/SCL), address 0x68;
+//    • accelerometer — accelerations ax/ay/az (in m/s^2), from which we get the tilt angle;
+//    • pitch/roll — the angle via atan2 formulas (tilt "forward-back" and "sideways");
+//    • we publish more often (5 times per second) — the dashboard draws "almost in real time".
 //
-//  Библиотека: adafruit/Adafruit MPU6050 (см. platformio.ini, env lesson20_mpu6050).
+//  Library: adafruit/Adafruit MPU6050 (see platformio.ini, env lesson20_mpu6050).
 // ============================================================================
 
 #include <Arduino.h>
@@ -31,44 +31,44 @@
 const char* SSID = "Koleso";
 const char* PASS = "12345zxc";
 
-// ---- MQTT-брокер (RabbitMQ + mqtt-плагин) ---------------------------------
-// LAN-IP компьютера с docker compose (НЕ localhost: ESP32 — отдельное устройство).
-const char* MQTT_BROKER = "192.168.1.164";   // <-- заменить на IP своего ПК
+// ---- MQTT broker (RabbitMQ + mqtt plugin) ---------------------------------
+// LAN IP of the computer running docker compose (NOT localhost: the ESP32 is a separate device).
+const char* MQTT_BROKER = "192.168.1.164";   // <-- replace with your PC's IP
 const uint16_t MQTT_PORT = 1883;
 
-// Учётка RabbitMQ. guest работает только с localhost — для ESP32 создай
-// отдельного пользователя esp / esp-pass (см. урок 19 / README телеметрии).
+// RabbitMQ account. guest works only from localhost — for the ESP32 create
+// a separate user esp / esp-pass (see lesson 19 / the telemetry README).
 const char* MQTT_USER = "esp";
 const char* MQTT_PASS = "esp-pass";
 
-// <device> в топике sensors/<device>/<metric>.
+// <device> in topic sensors/<device>/<metric>.
 const char* DEVICE_ID = "esp32";
 const char* CLIENT_ID = "esp32-lesson20";
 
-// ---- Топики ----------------------------------------------------------------
-// По одному числу на метрику. MQTT-плагин RabbitMQ превращает слэши в точки:
+// ---- Topics ----------------------------------------------------------------
+// One number per metric. The RabbitMQ MQTT plugin turns slashes into dots:
 //   sensors/esp32/pitch -> routing key sensors.esp32.pitch,
-// а .NET-консьюмер (ParseReading) читает его как sensors.<device>.<metric>.
-// pitch, roll и yaw — это просто «метрики», бэкенд их менять не надо.
+// and the .NET consumer (ParseReading) reads it as sensors.<device>.<metric>.
+// pitch, roll and yaw are just "metrics", the backend needs no changes for them.
 const char* TOPIC_PITCH = "sensors/esp32/pitch";
 const char* TOPIC_ROLL  = "sensors/esp32/roll";
 const char* TOPIC_YAW   = "sensors/esp32/yaw";
 
-// ---- Датчик ----------------------------------------------------------------
-// tockn-библиотека не проверяет WHO_AM_I, поэтому работает и с MPU6050, и с
-// MPU6500 (нашим чипом, WHO_AM_I=0x70). Конструктору передаём шину I2C.
+// ---- Sensor ----------------------------------------------------------------
+// The tockn library doesn't check WHO_AM_I, so it works with both the MPU6050 and
+// the MPU6500 (our chip, WHO_AM_I=0x70). The constructor takes the I2C bus.
 MPU6050 mpu(Wire);
 
-// ---- Объекты сети ----------------------------------------------------------
+// ---- Network objects -------------------------------------------------------
 WiFiClient   net;
 PubSubClient mqtt(net);
 
 unsigned long lastPublish = 0;
-const unsigned long PUBLISH_INTERVAL = 200;   // 200 мс = 5 раз в секунду
+const unsigned long PUBLISH_INTERVAL = 200;   // 200 ms = 5 times per second
 
 // ---------------------------------------------------------------------------
-//  Переподключение к брокеру. Здесь мы только публикуем, подписок нет,
-//  поэтому после connect ничего дополнительно оформлять не нужно.
+//  Reconnecting to the broker. Here we only publish, there are no subscriptions,
+//  so nothing extra needs to be set up after connect.
 // ---------------------------------------------------------------------------
 void reconnect() {
   while (!mqtt.connected()) {
@@ -76,7 +76,7 @@ void reconnect() {
     if (mqtt.connect(CLIENT_ID, MQTT_USER, MQTT_PASS)) {
       Serial.println("OK");
     } else {
-      // state(): -2 = сеть, 4 = логин/пароль, 5 = не авторизован.
+      // state(): -2 = network, 4 = login/password, 5 = not authorized.
       Serial.printf("ошибка, state=%d, повтор через 3 c\n", mqtt.state());
       delay(3000);
     }
@@ -86,15 +86,15 @@ void reconnect() {
 void setup() {
   Serial.begin(115200);
 
-  // 1) I2C + датчик. Wire.begin(SDA, SCL) — задаём пины явно.
+  // 1) I2C + sensor. Wire.begin(SDA, SCL) — we set the pins explicitly.
   Wire.begin(MPU_SDA, MPU_SCL);
   Serial.print("[MPU] Инициализация... ");
-  mpu.begin();   // tockn::begin() ничего не возвращает и WHO_AM_I не проверяет
+  mpu.begin();   // tockn::begin() returns nothing and doesn't check WHO_AM_I
 
-  // Калибровка нуля гироскопа: датчик должен лежать НЕПОДВИЖНО ~3 секунды.
-  // Библиотека усредняет дрейф и вычитает его дальше (иначе углы «уплывают»).
+  // Gyro zero calibration: the sensor must lie STILL for ~3 seconds.
+  // The library averages the drift and subtracts it afterwards (otherwise the angles "wander").
   Serial.println("калибровка гироскопа, не трогай датчик...");
-  mpu.calcGyroOffsets(true);   // true = печатать прогресс в Serial
+  mpu.calcGyroOffsets(true);   // true = print progress to Serial
   Serial.println("[MPU] OK");
 
   // 2) Wi-Fi
@@ -103,54 +103,54 @@ void setup() {
   while (WiFi.status() != WL_CONNECTED) { delay(500); Serial.print("."); }
   Serial.printf("\n[WiFi] IP: %s\n", WiFi.localIP().toString().c_str());
 
-  // 3) MQTT: только адрес брокера (колбэк не нужен — мы не подписываемся).
+  // 3) MQTT: only the broker address (no callback needed — we don't subscribe).
   mqtt.setServer(MQTT_BROKER, MQTT_PORT);
 }
 
 void loop() {
-  // Держим MQTT-соединение живым.
+  // Keep the MQTT connection alive.
   if (!mqtt.connected()) reconnect();
   mqtt.loop();
 
-  // PUBLISH раз в PUBLISH_INTERVAL мс (без блокирующего delay).
+  // PUBLISH every PUBLISH_INTERVAL ms (without a blocking delay).
   unsigned long now = millis();
   if (now - lastPublish >= PUBLISH_INTERVAL) {
     lastPublish = now;
 
-    // Обновляем показания датчика (обязательно перед каждым чтением).
+    // Update the sensor readings (required before every read).
     mpu.update();
 
-    // Ускорения по X/Y/Z (tockn отдаёт их в g — для atan2 единицы не важны).
+    // Accelerations along X/Y/Z (tockn returns them in g — units don't matter for atan2).
     float ax = mpu.getAccX();
     float ay = mpu.getAccY();
     float az = mpu.getAccZ();
 
-    // Угол наклона из вектора силы тяжести (в градусах):
-    //   roll  — крен «вбок»    (поворот вокруг оси X);
-    //   pitch — тангаж «вперёд-назад» (поворот вокруг оси Y).
-    // atan2 сам разбирается со знаками и квадрантами.
+    // Tilt angle from the gravity vector (in degrees):
+    //   roll  — "sideways" bank         (rotation around the X axis);
+    //   pitch — "forward-back" pitch    (rotation around the Y axis).
+    // atan2 handles the signs and quadrants by itself.
     float roll  = atan2f(ay, az) * 180.0f / PI;
     float pitch = atan2f(-ax, sqrtf(ay * ay + az * az)) * 180.0f / PI;
 
-    // Курс (рыскание, поворот вокруг вертикали) — акселерометром не измеряется:
-    // сила тяжести при таком повороте не меняется. Берём интеграл гироскопа по Z,
-    // который tockn ведёт сама (getAngleZ, calcGyroOffsets вычел дрейф в setup).
-    // Опорного «севера» нет, поэтому со временем значение ДРЕЙФУЕТ — это нормально
-    // для гиро-only без магнитометра.
+    // Heading (yaw, rotation around the vertical) can't be measured by the accelerometer:
+    // gravity doesn't change under such a rotation. We take the integrated Z gyro,
+    // which tockn tracks itself (getAngleZ; calcGyroOffsets subtracted the drift in setup).
+    // There is no reference "north", so the value DRIFTS over time — that's normal
+    // for gyro-only without a magnetometer.
     float yaw = mpu.getAngleZ();
 
-    // Тело сообщения — голое число (именно это парсит .NET-консьюмер).
+    // Message body is a bare number (exactly what the .NET consumer parses).
     char buf[16];
 
-    dtostrf(pitch, 0, 1, buf);            // например "-3.4"
+    dtostrf(pitch, 0, 1, buf);            // e.g. "-3.4"
     mqtt.publish(TOPIC_PITCH, buf);
     Serial.printf("[MQTT] -> %s = %s\n", TOPIC_PITCH, buf);
 
-    dtostrf(roll, 0, 1, buf);             // например "12.1"
+    dtostrf(roll, 0, 1, buf);             // e.g. "12.1"
     mqtt.publish(TOPIC_ROLL, buf);
     Serial.printf("[MQTT] -> %s = %s\n", TOPIC_ROLL, buf);
 
-    dtostrf(yaw, 0, 1, buf);              // например "-45.0" (дрейфует со временем)
+    dtostrf(yaw, 0, 1, buf);              // e.g. "-45.0" (drifts over time)
     mqtt.publish(TOPIC_YAW, buf);
     Serial.printf("[MQTT] -> %s = %s\n", TOPIC_YAW, buf);
   }

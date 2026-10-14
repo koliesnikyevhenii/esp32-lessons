@@ -1,64 +1,64 @@
 // ============================================================================
-//  Этап 6. Камера — урок 25: все возможности сенсора в одной панели
+//  Stage 6. Camera — lesson 25: every sensor capability in one panel
 // ----------------------------------------------------------------------------
-//  Цель: пощупать, ЧТО вообще умеет сенсор, кроме "выдавать кадры". Урок 24 дал
-//  поток; здесь к потоку добавляется панель управления, которая крутит настройки
-//  камеры на живом видео — и сразу видно, как каждая из них влияет на картинку
-//  и на количество кадров в секунду.
+//  Goal: get a feel for WHAT the sensor can do besides "producing frames". Lesson 24
+//  gave us a stream; here the stream gets a control panel that tweaks camera
+//  settings on live video — and you immediately see how each of them affects the
+//  picture and the number of frames per second.
 //
-//  Главная идея урока: настройки живут не в нашем коде, а В САМОМ СЕНСОРЕ.
-//  Драйвер отдаёт структуру sensor_t с указателями на функции:
+//  The main idea of the lesson: the settings live not in our code but IN THE SENSOR ITSELF.
+//  The driver exposes a sensor_t struct with function pointers:
 //
 //      sensor_t* s = esp_camera_sensor_get();
-//      s->set_brightness(s, 1);        // <- пишем регистры сенсора по SCCB
-//      s->status.brightness;           // <- текущее значение
+//      s->set_brightness(s, 1);        // <- writes sensor registers over SCCB
+//      s->status.brightness;           // <- current value
 //
-//  То есть set_* — это не "фильтр в прошивке", а команда чипу камеры. Поэтому
-//  оно бесплатно по процессору: ESP32 не обрабатывает пиксели вообще.
+//  So set_* is not a "filter in the firmware" but a command to the camera chip. That's
+//  why it is free in CPU terms: the ESP32 doesn't process pixels at all.
 //
-//  Ровно одно исключение — quality. На нашей плате стоит GC2145, он не умеет
-//  отдавать JPEG, и кадр сжимается программно (frame2jpg, урок 23). Значит
-//  quality здесь — параметр НАШЕГО кодека, а не регистр сенсора: шкала 0..100,
-//  больше = лучше (у аппаратного JPEG в OV2640 было наоборот, 0..63, меньше =
-//  лучше). Заодно видно, чем «настройка железа» отличается от «настройки кода»:
-//  все остальные ползунки процессор не грузят, а этот — грузит.
+//  Exactly one exception — quality. Our board carries a GC2145, which cannot
+//  output JPEG, so the frame is compressed in software (frame2jpg, lesson 23). Hence
+//  quality here is a parameter of OUR codec, not a sensor register: scale 0..100,
+//  higher = better (the OV2640's hardware JPEG was the reverse, 0..63, lower =
+//  better). It also shows how "hardware settings" differ from "code settings":
+//  none of the other sliders load the CPU, but this one does.
 //
-//  У GC2145 часть set_* вернёт -1 («unsupported») — так и должно быть, набор
-//  регистров у каждого сенсора свой. Панель честно покажет это статусом.
+//  On the GC2145 some set_* return -1 ("unsupported") — that's expected, every
+//  sensor has its own register set. The panel honestly shows this as a status.
 //
-//  Что изучаем (и что смотрим глазами):
-//    - РАЗМЕР И КАЧЕСТВО:    framesize (сенсор) и quality (наш кодек) -> к/с и битрейт;
-//    - ЯРКОСТЬ/ЦВЕТ:         brightness, contrast, saturation;
-//    - ЭФФЕКТЫ:              special_effect (негатив, ч/б, сепия, тонировки);
-//    - ГЕОМЕТРИЯ:            hmirror, vflip (пригодится, когда камера на роботе
-//                            окажется перевёрнутой);
-//    - АВТОМАТИКА:           awb/awb_gain/wb_mode (баланс белого),
-//                            aec/aec2/ae_level/aec_value (экспозиция),
-//                            agc/agc_gain/gainceiling (усиление -> шум в темноте);
-//    - КОРРЕКЦИИ:            bpc, wpc, raw_gma, lenc, dcw;
-//    - ДИАГНОСТИКА:          colorbar (тестовые полосы вместо картинки — если они
-//                            есть, а изображения нет, значит проблема в оптике/свете,
-//                            а не в шине данных).
+//  What we learn (and what we watch with our own eyes):
+//    - SIZE AND QUALITY:     framesize (sensor) and quality (our codec) -> fps and bitrate;
+//    - BRIGHTNESS/COLOUR:    brightness, contrast, saturation;
+//    - EFFECTS:              special_effect (negative, b/w, sepia, tints);
+//    - GEOMETRY:             hmirror, vflip (handy when the camera on the robot
+//                            ends up upside down);
+//    - AUTOMATICS:           awb/awb_gain/wb_mode (white balance),
+//                            aec/aec2/ae_level/aec_value (exposure),
+//                            agc/agc_gain/gainceiling (gain -> noise in the dark);
+//    - CORRECTIONS:          bpc, wpc, raw_gma, lenc, dcw;
+//    - DIAGNOSTICS:          colorbar (test bars instead of the picture — if they
+//                            show up but the image doesn't, the problem is optics/light,
+//                            not the data bus).
 //
-//  Эндпоинты:
-//    :80/                          HTML-панель + стрим
-//    :80/status                    JSON со ВСЕМИ текущими настройками
-//    :80/control?var=NAME&val=N    поменять одну настройку
+//  Endpoints:
+//    :80/                          HTML panel + stream
+//    :80/status                    JSON with ALL current settings
+//    :80/control?var=NAME&val=N    change one setting
 //    :80/stats                     JSON: fps/kbps/clients/rssi/heap
-//    :81/stream                    MJPEG-поток (как в уроке 24)
+//    :81/stream                    MJPEG stream (as in lesson 24)
 //
-//  Сборка/прошивка:
+//  Build/flash:
 //    pio run -e lesson25_cam_controls -t upload
 //    pio device monitor
 //
-//  Плата: HW-679 ESP32-S3-CAM (board = esp32-s3-devkitc-1 + memory_type = qio_opi).
-//  Пины — include/pins.h (блок CAM_*).
+//  Board: HW-679 ESP32-S3-CAM (board = esp32-s3-devkitc-1 + memory_type = qio_opi).
+//  Pins — include/pins.h (the CAM_* block).
 // ============================================================================
 
 #include <Arduino.h>
 #include <WiFi.h>
 #include "esp_camera.h"
-#include "img_converters.h"   // frame2jpg(): программное сжатие RGB565 -> JPEG
+#include "img_converters.h"   // frame2jpg(): software RGB565 -> JPEG compression
 #include "esp_http_server.h"
 #include "esp_timer.h"
 #include "pins.h"
@@ -78,34 +78,34 @@ httpd_handle_t streamServer = NULL;
 volatile float streamFps     = 0;
 volatile float streamKbps    = 0;
 volatile int   streamClients = 0;
-int flashLevel = 0;                      // помним, чтобы отдавать в /status
+int flashLevel = 0;                      // remembered so /status can report it
 
-// quality здесь — НЕ регистр сенсора. GC2145 на нашей плате не умеет JPEG,
-// кадр жмёт frame2jpg (см. урок 23), и её шкала другая: 0..100, больше = лучше.
-// Поэтому единственный «нежелезный» контрол на странице — вот эта переменная.
+// quality here is NOT a sensor register. The GC2145 on our board can't do JPEG,
+// the frame is compressed by frame2jpg (see lesson 23), and its scale differs: 0..100, higher = better.
+// So the only "non-hardware" control on the page is this variable.
 int jpegQuality = 80;
-// ---- Разрешение: почему его нельзя менять "на ходу" ------------------------
-// Драйвер esp32-camera считает геометрию кадра ОДИН раз — в esp_camera_init():
-// cam_config() запоминает width/height и выделяет буферы ровно под этот размер.
-// А sensor_t::set_framesize() — функция драйвера СЕНСОРА: она пишет регистры
-// GC2145 и про буферы не знает ничего. В режиме JPEG это ещё сходило бы с рук
-// (JPEG самодостаточен, размер лежит внутри кадра), но у нас RGB565: frame2jpg()
-// читает fb->width/height, которые остались прежними, а сенсор уже гонит строки
-// другой длины. Результат — ровно те самые полосы и чёрный низ кадра.
-// Поэтому разрешение меняем ПЕРЕИНИЦИАЛИЗАЦИЕЙ камеры: deinit + init.
-static framesize_t       camSize = FRAMESIZE_QVGA;   // что стоит прямо сейчас
-static SemaphoreHandle_t camLock = NULL;             // у камеры один хозяин за раз
+// ---- Resolution: why it can't be changed "on the fly" -----------------------
+// The esp32-camera driver computes the frame geometry ONCE — in esp_camera_init():
+// cam_config() stores width/height and allocates buffers for exactly that size.
+// And sensor_t::set_framesize() is a SENSOR driver function: it writes GC2145
+// registers and knows nothing about the buffers. In JPEG mode we'd still get away
+// with it (JPEG is self-contained, the size is inside the frame), but we use RGB565:
+// frame2jpg() reads fb->width/height, which stayed the same, while the sensor already
+// emits rows of a different length. The result is exactly those stripes and a black bottom.
+// So we change resolution by RE-INITIALISING the camera: deinit + init.
+static framesize_t       camSize = FRAMESIZE_QVGA;   // what is set right now
+static SemaphoreHandle_t camLock = NULL;             // the camera has one owner at a time
 
-// RGB565 — 2 байта на пиксель, и буфер выделяется целиком:
-//   QVGA 150 КБ | VGA 600 КБ | SVGA 938 КБ | XGA 1,5 МБ | UXGA 3,7 МБ.
-// Два UXGA-буфера (7,3 МБ) в 8 МБ PSRAM вместе с Wi-Fi и выходным буфером
-// frame2jpg уже не живут, поэтому на больших кадрах берём одинарную буферизацию.
+// RGB565 is 2 bytes per pixel, and the buffer is allocated in full:
+//   QVGA 150 KB | VGA 600 KB | SVGA 938 KB | XGA 1.5 MB | UXGA 3.7 MB.
+// Two UXGA buffers (7.3 MB) no longer fit in 8 MB of PSRAM alongside Wi-Fi and the
+// frame2jpg output buffer, so on large frames we use single buffering.
 static size_t fbCountFor(framesize_t fs) {
   return (fs <= FRAMESIZE_SVGA) ? 2 : 1;
 }
 
 
-// ---- Подсветка и индикатор (на S3-платах пины не стандартизованы -> в pins.h -1) ----
+// ---- Flash light and status indicator (pins aren't standardised on S3 boards -> -1 in pins.h) ----
 void flashInit() {
 #if CAM_FLASH_LED >= 0
   ledcSetup(CH_CAM_FLASH, 5000, 8);
@@ -145,28 +145,28 @@ bool initCamera(framesize_t fs) {
   cfg.pin_href  = CAM_HREF;
   cfg.pin_pclk  = CAM_PCLK;
 
-  // XCLK зависит от размера кадра, и это не тонкая настройка, а условие работы.
-  // На больших кадрах шина камеры не успевает: DMA не вывозит поток пикселей в
-  // PSRAM, cam_hal начинает сыпать "EV-EOF-OVF", а fb_get() возвращает NULL —
-  // камера встаёт насмерть до следующей переинициализации. Замерено на этой
-  // плате: UXGA на 20 МГц = штурм OVF и ни одного кадра, на 10 МГц = 0,5 к/с и
-  // нормальная картинка. SXGA на 10 МГц выходит даже быстрее (0,7 против 0,4),
-  // так что это не только лекарство от OVF.
+  // XCLK depends on the frame size, and that is not fine-tuning but a requirement.
+  // On large frames the camera bus can't keep up: DMA can't push the pixel stream into
+  // PSRAM, cam_hal starts spewing "EV-EOF-OVF", and fb_get() returns NULL —
+  // the camera is dead until the next re-initialisation. Measured on this
+  // board: UXGA at 20 MHz = an OVF storm and not a single frame, at 10 MHz = 0.5 fps and
+  // a normal picture. SXGA at 10 MHz is even faster (0.7 vs 0.4),
+  // so this is not just a cure for OVF.
   cfg.xclk_freq_hz = (fs >= FRAMESIZE_XGA) ? 10000000 : 20000000;
   cfg.ledc_timer   = LEDC_TIMER_0;
   cfg.ledc_channel = LEDC_CHANNEL_0;
 
-  cfg.pixel_format = PIXFORMAT_RGB565;   // GC2145 не отдаёт JPEG — жмём программно
-  cfg.jpeg_quality = 12;                 // при RGB565 не используется
+  cfg.pixel_format = PIXFORMAT_RGB565;   // GC2145 doesn't output JPEG — we compress in software
+  cfg.jpeg_quality = 12;                 // unused with RGB565
 
-  // Сжатие процессорное, его цена растёт с площадью кадра: стартуем с QVGA,
-  // а списком framesize можно поднять и увидеть, как проседают к/с.
+  // Compression runs on the CPU, its cost grows with frame area: we start at QVGA,
+  // and the framesize list lets you go higher and watch the fps drop.
   if (psramFound()) {
     cfg.frame_size  = fs;
     cfg.fb_count    = fbCountFor(fs);
     cfg.fb_location = CAMERA_FB_IN_PSRAM;
   } else {
-    // Без PSRAM больше QVGA положить просто некуда: внутренней DRAM ~300 КБ.
+    // Without PSRAM there is simply nowhere to put more than QVGA: internal DRAM is ~300 KB.
     cfg.frame_size  = FRAMESIZE_QVGA;
     cfg.fb_count    = 1;
     cfg.fb_location = CAMERA_FB_IN_DRAM;
@@ -178,24 +178,24 @@ bool initCamera(framesize_t fs) {
     Serial.printf("[CAM] init FAILED: 0x%x (%s)\n", err, esp_err_to_name(err));
     return false;
   }
-  camSize = cfg.frame_size;   // запомнили: applyFramesize() сверяется с этим
+  camSize = cfg.frame_size;   // remembered: applyFramesize() compares against this
   Serial.printf("[CAM] кадр #%d, буферов %u\n", (int)camSize, (unsigned)cfg.fb_count);
   return true;
 }
 // ---------------------------------------------------------------------------
-//  Смена разрешения = deinit + init (почему — см. комментарий у camSize).
-//  Вызывают её обработчики на :80, а кадры в это время тянет задача стрима
-//  на :81 — поэтому оба берут camLock: без него стрим успел бы получить fb
-//  от уже уничтоженного драйвера.
+//  Changing resolution = deinit + init (why — see the comment at camSize).
+//  It is called by the handlers on :80, while frames are being pulled by the stream
+//  task on :81 — so both take camLock: without it the stream could get an fb
+//  from an already destroyed driver.
 // ---------------------------------------------------------------------------
 static bool applyFramesize(framesize_t fs) {
-  if (!psramFound() && fs > FRAMESIZE_QVGA) return false;   // в DRAM больше не влезет
+  if (!psramFound() && fs > FRAMESIZE_QVGA) return false;   // won't fit in DRAM
   if (fs == camSize) return true;
 
   xSemaphoreTake(camLock, portMAX_DELAY);
   esp_camera_deinit();
   bool ok = initCamera(fs);
-  if (!ok) {                                  // не поднялось — откатываемся
+  if (!ok) {                                  // didn't come up — roll back
     Serial.println("[CAM] не удалось, откат на QVGA");
     ok = initCamera(FRAMESIZE_QVGA);
   }
@@ -205,9 +205,9 @@ static bool applyFramesize(framesize_t fs) {
 
 
 // ---------------------------------------------------------------------------
-//  ПАНЕЛЬ. Список контролов описан массивом в JS и рисуется циклом — иначе
-//  вёрстка на 25 настроек не влезла бы во флеш-строку.
-//  t: 'r' = слайдер (range), 's' = список (select), 'c' = галочка (checkbox).
+//  THE PANEL. The list of controls is described as an array in JS and drawn in a loop —
+//  otherwise markup for 25 settings wouldn't fit into the flash string.
+//  t: 'r' = slider (range), 's' = list (select), 'c' = checkbox.
 // ---------------------------------------------------------------------------
 static const char PAGE_HTML[] = R"HTML(
 <!doctype html><html lang="ru"><head><meta charset="utf-8">
@@ -315,7 +315,7 @@ for(const [title,items] of GROUPS){
     }else{
       el=document.createElement('select');
       for(const [val,text] of it.o){ const o=document.createElement('option'); o.value=val; o.textContent=text; el.appendChild(o); }
-      // framesize меняет размер кадра -> поток надо переоткрыть, иначе <img> залипает
+      // framesize changes the frame size -> the stream must be reopened, otherwise <img> freezes
       el.onchange=()=>{ set(it.v,el.value); if(it.v==='framesize') setTimeout(open_,300); };
       row.appendChild(el);
     }
@@ -348,7 +348,7 @@ static esp_err_t indexHandler(httpd_req_t* req) {
 }
 
 // ---------------------------------------------------------------------------
-//  Стрим — тот же, что в уроке 24.
+//  Stream — the same as in lesson 24.
 // ---------------------------------------------------------------------------
 static esp_err_t streamHandler(httpd_req_t* req) {
   esp_err_t res = httpd_resp_set_type(req, STREAM_CONTENT_TYPE);
@@ -361,15 +361,15 @@ static esp_err_t streamHandler(httpd_req_t* req) {
   uint32_t windowFrames = 0, windowBytes = 0;
 
   while (true) {
-    // Кадр берём под camLock: пока мы держим fb, никто не имеет права сделать
-    // deinit камеры из обработчика /control?var=framesize.
+    // Take the frame under camLock: while we hold fb, nobody is allowed to
+    // deinit the camera from the /control?var=framesize handler.
     xSemaphoreTake(camLock, portMAX_DELAY);
     camera_fb_t* fb = esp_camera_fb_get();
-    // Сенсор отдаёт сырой RGB565 — сжимаем сами (см. урок 23).
+    // The sensor outputs raw RGB565 — we compress ourselves (see lesson 23).
     uint8_t* jpg = nullptr;
     size_t   jpg_len = 0;
     bool ok = fb && frame2jpg(fb, jpegQuality, &jpg, &jpg_len);
-    if (fb) esp_camera_fb_return(fb);  // сырой кадр драйверу больше не нужен
+    if (fb) esp_camera_fb_return(fb);  // the driver no longer needs the raw frame
     xSemaphoreGive(camLock);
 
     if (!fb || !ok) { res = ESP_FAIL; break; }
@@ -383,7 +383,7 @@ static esp_err_t streamHandler(httpd_req_t* req) {
 
     windowFrames++;
     windowBytes += jpg_len;
-    free(jpg);                         // буфер от frame2jpg наш
+    free(jpg);                         // the frame2jpg buffer is ours
     if (res != ESP_OK) break;
 
     int64_t now = esp_timer_get_time();
@@ -401,30 +401,30 @@ static esp_err_t streamHandler(httpd_req_t* req) {
 }
 
 // ---------------------------------------------------------------------------
-//  /control?var=NAME&val=N — единая точка входа для ВСЕХ настроек сенсора.
-//  Каждая ветка — вызов метода из sensor_t, то есть запись в регистры OV2640.
-//  Возврат 0 = ок, -1 = сенсор не поддерживает (например sharpness у OV2640).
+//  /control?var=NAME&val=N — a single entry point for ALL sensor settings.
+//  Each branch is a call to a sensor_t method, i.e. a write to OV2640 registers.
+//  Return 0 = ok, -1 = the sensor doesn't support it (e.g. sharpness on the OV2640).
 // ---------------------------------------------------------------------------
 static int applyControl(const char* var, int val) {
-  // Вспышка — не настройка сенсора, а наш светодиод, но панели удобнее иметь
-  // единый эндпоинт. Если пин не найден (CAM_FLASH_LED = -1) — ползунок просто
-  // ни на что не влияет.
+  // The flash isn't a sensor setting but our own LED, yet the panel finds a
+  // single endpoint more convenient. If the pin isn't found (CAM_FLASH_LED = -1), the
+  // slider simply has no effect.
   if (!strcmp(var, "flash")) {
     flashLevel = constrain(val, 0, 255);
     flashSet(flashLevel);
     return 0;
   }
 
-  // quality обрабатываем ДО сенсора: у нас это параметр программного кодека,
-  // а не регистр. s->set_quality() на RGB565-сенсоре просто вернул бы -1.
+  // quality is handled BEFORE the sensor: for us it's a software codec parameter,
+  // not a register. s->set_quality() on an RGB565 sensor would just return -1.
   if (!strcmp(var, "quality")) {
     jpegQuality = constrain(val, 10, 95);
     return 0;
   }
 
-  // framesize тоже обрабатываем ДО сенсора, и по совсем другой причине, чем
-  // quality: set_framesize() не пересоздаёт буферы кадра, а в RGB565 их размер
-  // обязан совпадать с кадром. Поэтому — полная переинициализация камеры.
+  // framesize is also handled BEFORE the sensor, for a completely different reason than
+  // quality: set_framesize() doesn't recreate the frame buffers, and with RGB565 their size
+  // must match the frame. Hence a full camera re-initialisation.
   if (!strcmp(var, "framesize")) {
     framesize_t fs = (framesize_t)constrain(val, (int)FRAMESIZE_96X96, (int)FRAMESIZE_UXGA);
     return applyFramesize(fs) ? 0 : -1;
@@ -436,7 +436,7 @@ static int applyControl(const char* var, int val) {
   if (!strcmp(var, "brightness"))     return s->set_brightness(s, val);
   if (!strcmp(var, "contrast"))       return s->set_contrast(s, val);
   if (!strcmp(var, "saturation"))     return s->set_saturation(s, val);
-  if (!strcmp(var, "sharpness"))      return s->set_sharpness(s, val);   // OV2640: не поддерживается, вернёт -1
+  if (!strcmp(var, "sharpness"))      return s->set_sharpness(s, val);   // OV2640: not supported, returns -1
   if (!strcmp(var, "special_effect")) return s->set_special_effect(s, val);
   if (!strcmp(var, "hmirror"))        return s->set_hmirror(s, val);
   if (!strcmp(var, "vflip"))          return s->set_vflip(s, val);
@@ -478,8 +478,8 @@ static esp_err_t controlHandler(httpd_req_t* req) {
 }
 
 // ---------------------------------------------------------------------------
-//  /status — снимок ВСЕХ настроек. Читаем не свои переменные, а s->status:
-//  драйвер хранит там то, что реально записано в сенсор.
+//  /status — a snapshot of ALL settings. We read not our own variables but s->status:
+//  that's where the driver keeps what was actually written to the sensor.
 // ---------------------------------------------------------------------------
 static esp_err_t statusHandler(httpd_req_t* req) {
   sensor_t* s = esp_camera_sensor_get();
@@ -546,7 +546,7 @@ void startServers() {
 
 void setup() {
   Serial.begin(115200);
-  delay(1500);      // нативному USB нужно время подняться, иначе первые строки теряются
+  delay(1500);      // native USB needs time to come up, otherwise the first lines are lost
   Serial.println("\n=== Урок 25. Возможности OV2640 ===");
 
   statusLed(true);
@@ -559,13 +559,13 @@ void setup() {
     return;
   }
 
-  // Стартовая коррекция "по умолчанию", как в примере CameraWebServer:
-  // сенсор из коробки даёт заметно тусклую и малонасыщенную картинку.
+  // Initial "default" correction, as in the CameraWebServer example:
+  // out of the box the sensor gives a noticeably dull, undersaturated picture.
   sensor_t* s = esp_camera_sensor_get();
   if (s) {
     s->set_brightness(s, 1);
     s->set_saturation(s, 1);
-    // Камера на роботе часто стоит вверх ногами — тогда раскомментируй:
+    // The camera on a robot is often mounted upside down — then uncomment:
     // s->set_vflip(s, 1);
     // s->set_hmirror(s, 1);
     camera_sensor_info_t* info = esp_camera_sensor_get_info(&s->id);
@@ -586,5 +586,5 @@ void setup() {
 }
 
 void loop() {
-  delay(1000);   // вся работа — в задачах esp_http_server
+  delay(1000);   // all the work happens in esp_http_server tasks
 }

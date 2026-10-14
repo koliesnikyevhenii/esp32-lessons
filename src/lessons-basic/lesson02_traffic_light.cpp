@@ -1,7 +1,7 @@
 #include <Arduino.h>
 #include "pins.h"
 
-// Lesson 2: неблокирующий светофор на millis() (без delay).
+// Lesson 2: non-blocking traffic light on millis() (no delay).
 
 static unsigned long previousMillis = 0;
 static const long interval = 3000;

@@ -1,7 +1,7 @@
 #include <Arduino.h>
 #include "pins.h"
 
-// Lesson 7: кнопка переключает светодиод (toggle по фронту нажатия).
+// Lesson 7: a button toggles the LED (toggle on the press edge).
 
 static int lastReading = HIGH;
 static unsigned long lastChange = 0;
@@ -15,7 +15,7 @@ void setup() {
 void loop() {
   int reading = digitalRead(BUTTON);
   if (reading == LOW && lastReading == HIGH && millis() - lastChange > 10) {
-    ledOn = !ledOn;                              // переключаем состояние
+    ledOn = !ledOn;                              // flip the state
     digitalWrite(LED_RED2, ledOn ? HIGH : LOW);
     lastChange = millis();
   }

@@ -1,70 +1,70 @@
 // ============================================================================
-//  Этап 6. Камера — урок 26: FPV-машинка (видео + пульт в одной странице)
+//  Stage 6. Camera — lesson 26: FPV car (video + remote on one page)
 // ----------------------------------------------------------------------------
-//  Цель: собрать то, ради чего был весь Этап 6 — открыть страницу, видеть
-//  картинку "из глаз робота" и рулить им, глядя в эту картинку (FPV = First
-//  Person View). Именно так летают на дронах.
+//  Goal: build what all of Stage 6 was for — open a page, see the picture
+//  "through the robot's eyes" and drive it while looking at that picture (FPV = First
+//  Person View). This is exactly how drones are flown.
 //
-//  АРХИТЕКТУРА (важно понять до прошивки!). Плат ДВЕ:
+//  ARCHITECTURE (important to understand before flashing!). There are TWO boards:
 //
-//    Браузер ──GET :81/stream──> ESP32-CAM ──── видео
+//    Browser ──GET :81/stream──> ESP32-CAM ──── video
 //            ──GET /drive?cmd=─> ESP32-CAM ──MQTT──> RabbitMQ ──MQTT──> ESP32 DevKit
-//                                                                        └─> TB6612FNG ─> моторы
+//                                                                        └─> TB6612FNG ─> motors
 //                                              RabbitMQ <──MQTT── DevKit (pitch/roll/yaw/guard)
 //
-//  ESP32-CAM НЕ крутит моторы. Она делает две вещи: отдаёт видео и
-//  ПЕРЕПУБЛИКОВЫВАЕТ нажатия кнопок в тот же топик commands/esp32/drive, который
-//  урок 22 уже слушает. Поэтому:
-//    - прошивку робота (урок 22) менять НЕ надо — контракт топиков тот же;
-//    - бэкенд и React-дашборд менять НЕ надо — они продолжают писать телеметрию;
-//    - рулить можно И из дашборда, И из FPV-страницы, хоть одновременно.
-//  Почему так, а не "всё на одной плате": у ESP32-S3 свободных GPIO как раз
-//  хватает на драйвер моторов (в отличие от старой AI-Thinker), так что вариант
-//  "камера сама рулит" здесь ТЕХНИЧЕСКИ возможен. Но на DevKit уже разведены и
-//  моторы, и MPU6050, и работает защита по наклону из урока 22 — переносить всё
-//  это на камеру значит выбросить готовое и потерять tilt guard. Поэтому по
-//  умолчанию две платы; вариант B (одна плата) с картой пинов S3 разобран в
+//  The ESP32-CAM does NOT drive the motors. It does two things: serves the video and
+//  REPUBLISHES button presses into the same topic commands/esp32/drive that
+//  lesson 22 already listens to. Therefore:
+//    - the robot firmware (lesson 22) does NOT need changes — the topic contract is the same;
+//    - the backend and the React dashboard do NOT need changes — they keep recording telemetry;
+//    - you can drive BOTH from the dashboard AND from the FPV page, even at the same time.
+//  Why this way and not "everything on one board": the ESP32-S3 has just enough free GPIOs
+//  for a motor driver (unlike the old AI-Thinker), so the "camera drives by itself"
+//  option is TECHNICALLY possible here. But the DevKit already has the motors and the
+//  MPU6050 wired, and runs lesson 22's tilt guard — moving all of that onto the camera
+//  means throwing away what's done and losing the tilt guard. So by default
+//  there are two boards; variant B (one board) with the S3 pin map is covered in
 //  documentation/lesson26_fpv_robot.md.
 //
-//  Что изучаем:
-//    - ДВЕ ЗАДАЧИ, ОДИН MQTT-КЛИЕНТ. Обработчик /drive живёт в задаче
-//      esp_http_server, а PubSubClient НЕ потокобезопасен. Поэтому обработчик
-//      только кладёт команду в очередь FreeRTOS (xQueueSend), а публикует её
-//      loop() (xQueueReceive). Это стандартный приём "producer -> queue -> consumer";
-//    - ESP32-CAM как ПОЛНОЦЕННОЕ MQTT-устройство: она и publish (телеметрия
-//      sensors/esp32cam/fps|rssi), и subscribe (слушает sensors/esp32/guard,
-//      чтобы показать на странице, что робот заблокировал себя по наклону);
-//    - <device> в контракте топиков — это не константа проекта: у камеры свой
-//      device-id esp32cam, и бэкенд пишет её метрики отдельной строкой в БД;
-//    - повтор команды пока кнопка нажата: у робота failsafe 700 мс (урок 21),
-//      поэтому страница шлёт команду каждые 300 мс и "stop" на отпускание;
-//    - управление с клавиатуры (WASD / стрелки) и с телефона (touch).
+//  What we study:
+//    - TWO TASKS, ONE MQTT CLIENT. The /drive handler lives in the
+//      esp_http_server task, and PubSubClient is NOT thread-safe. So the handler
+//      only puts the command into a FreeRTOS queue (xQueueSend), and loop() publishes
+//      it (xQueueReceive). This is the standard "producer -> queue -> consumer" pattern;
+//    - the ESP32-CAM as a FULL MQTT device: it both publishes (telemetry
+//      sensors/esp32cam/fps|rssi) and subscribes (listens to sensors/esp32/guard,
+//      to show on the page that the robot has blocked itself due to tilt);
+//    - <device> in the topic contract is not a project constant: the camera has its own
+//      device-id esp32cam, and the backend writes its metrics as a separate row in the DB;
+//    - repeating the command while a button is held: the robot has a 700 ms failsafe (lesson 21),
+//      so the page sends the command every 300 ms and "stop" on release;
+//    - control from the keyboard (WASD / arrows) and from a phone (touch).
 //
-//  Эндпоинты:
-//    :80/                 FPV-страница: видео + пульт
-//    :80/drive?cmd=NAME   forward|back|left|right|stop -> в очередь -> MQTT
+//  Endpoints:
+//    :80/                 FPV page: video + remote
+//    :80/drive?cmd=NAME   forward|back|left|right|stop -> queue -> MQTT
 //    :80/stats            JSON: fps, kbps, rssi, mqtt, guard, sent
-//    :81/stream           MJPEG-поток (как в уроке 24)
+//    :81/stream           MJPEG stream (as in lesson 24)
 //
-//  Перед прошивкой:
-//    1) SSID / PASS — твоя сеть 2.4 ГГц;
-//    2) MQTT_BROKER — LAN-IP компьютера с docker (НЕ localhost);
-//    3) MQTT_USER / MQTT_PASS — не guest (guest пускают только с localhost);
-//    4) на DevKit должен быть залит урок 22 (или 21) и он должен быть в сети.
+//  Before flashing:
+//    1) SSID / PASS — your 2.4 GHz network;
+//    2) MQTT_BROKER — LAN IP of the computer running docker (NOT localhost);
+//    3) MQTT_USER / MQTT_PASS — not guest (guest is only allowed from localhost);
+//    4) the DevKit must be flashed with lesson 22 (or 21) and be on the network.
 //
-//  Сборка/прошивка:
+//  Build/flash:
 //    pio run -e lesson26_fpv_robot -t upload
 //    pio device monitor
 //
-//  Плата: HW-679 ESP32-S3-CAM (board = esp32-s3-devkitc-1 + memory_type = qio_opi).
-//  Пины — include/pins.h (блок CAM_*).
+//  Board: HW-679 ESP32-S3-CAM (board = esp32-s3-devkitc-1 + memory_type = qio_opi).
+//  Pins — include/pins.h (CAM_* block).
 // ============================================================================
 
 #include <Arduino.h>
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include "esp_camera.h"
-#include "img_converters.h"   // frame2jpg(): программное сжатие RGB565 -> JPEG
+#include "img_converters.h"   // frame2jpg(): software RGB565 -> JPEG compression
 #include "esp_http_server.h"
 #include "esp_timer.h"
 #include "pins.h"
@@ -73,24 +73,24 @@
 const char* SSID = "Vektor_04";
 const char* PASS = "uteam2020";
 
-// Сжатие кадра программное (GC2145 без аппаратного JPEG, см. урок 23):
-// шкала frame2jpg — 0..100, БОЛЬШЕ = лучше картинка и больше байт.
+// Frame compression is done in software (GC2145 has no hardware JPEG, see lesson 23):
+// the frame2jpg scale is 0..100, HIGHER = better picture and more bytes.
 const int JPEG_QUALITY = 80;
 
-// ---- MQTT-брокер (RabbitMQ + mqtt-плагин) ---------------------------------
-const char* MQTT_BROKER = "192.168.0.7";   // <-- LAN-IP своего ПК
+// ---- MQTT broker (RabbitMQ + mqtt plugin) ---------------------------------
+const char* MQTT_BROKER = "192.168.0.7";   // <-- your PC's LAN IP
 const uint16_t MQTT_PORT = 1883;
 const char* MQTT_USER = "esp";
 const char* MQTT_PASS = "esp-pass";
 const char* CLIENT_ID = "esp32cam-lesson26";
 
-// ---- Топики ----------------------------------------------------------------
-// Команды шлём РОБОТУ (device = esp32) — тот самый топик из уроков 21/22.
+// ---- Topics ----------------------------------------------------------------
+// Commands go to the ROBOT (device = esp32) — the very topic from lessons 21/22.
 const char* TOPIC_DRIVE = "commands/esp32/drive";
-// Свою телеметрию камера публикует под СВОИМ device-id.
+// The camera publishes its own telemetry under ITS OWN device-id.
 const char* TOPIC_FPS   = "sensors/esp32cam/fps";
 const char* TOPIC_RSSI  = "sensors/esp32cam/rssi";
-// А это метрика РОБОТА: слушаем его защиту по наклону, чтобы подсветить на пульте.
+// And this is a ROBOT metric: we listen to its tilt guard to highlight it on the remote.
 const char* TOPIC_GUARD = "sensors/esp32/guard";
 
 // ---- MJPEG -----------------------------------------------------------------
@@ -105,27 +105,27 @@ httpd_handle_t streamServer = NULL;
 WiFiClient   net;
 PubSubClient mqtt(net);
 
-// ---- Очередь команд: httpd-задача -> loop() --------------------------------
-// PubSubClient однопоточный: публиковать из двух задач нельзя. Обработчик
-// HTTP-запроса кладёт команду сюда, а publish делает loop().
+// ---- Command queue: httpd task -> loop() -----------------------------------
+// PubSubClient is single-threaded: publishing from two tasks is not allowed. The
+// HTTP request handler puts the command here, and loop() does the publish.
 typedef struct { char text[12]; } cmd_msg_t;
 QueueHandle_t cmdQueue = NULL;
 
-// ---- Состояние -------------------------------------------------------------
+// ---- State -----------------------------------------------------------------
 volatile float streamFps  = 0;
 volatile float streamKbps = 0;
-// Разбивка времени кадра по стадиям (мс, среднее за секунду). Нужна, чтобы
-// не гадать, почему видео отстаёт: съёмка, сжатие и отправка тормозят
-// по совершенно разным причинам и лечатся тоже по-разному.
-volatile float streamMsGrab = 0;   // ожидание готового кадра от сенсора
-volatile float streamMsJpeg = 0;   // frame2jpg() — процессорное сжатие
-volatile float streamMsSend = 0;   // запись в сокет = упёрлись в Wi-Fi
-volatile uint32_t cmdSent = 0;      // сколько команд уехало в брокер
-volatile int robotGuard   = -1;     // -1 = ещё не слышали, 0 = ок, 1 = робот заблокирован
+// Frame time broken down by stage (ms, averaged over a second). Needed so we
+// don't have to guess why the video lags: capture, compression and sending slow down
+// for completely different reasons and are fixed differently too.
+volatile float streamMsGrab = 0;   // waiting for a ready frame from the sensor
+volatile float streamMsJpeg = 0;   // frame2jpg() — CPU compression
+volatile float streamMsSend = 0;   // socket write = bottlenecked on Wi-Fi
+volatile uint32_t cmdSent = 0;      // how many commands went out to the broker
+volatile int robotGuard   = -1;     // -1 = not heard yet, 0 = ok, 1 = robot blocked
 unsigned long lastTelemetry = 0;
 const unsigned long TELEMETRY_INTERVAL = 2000;
 
-// ---- Подсветка и индикатор (на S3-платах пины не стандартизованы -> в pins.h -1) ----
+// ---- Flash LED and indicator (pins aren't standardised on S3 boards -> -1 in pins.h) ----
 void flashInit() {
 #if CAM_FLASH_LED >= 0
   ledcSetup(CH_CAM_FLASH, 5000, 8);
@@ -144,8 +144,8 @@ void statusLed(bool on) {
 }
 
 // ---------------------------------------------------------------------------
-//  Камера. Для FPV разрешение специально НЕ максимальное: важнее низкая
-//  задержка и стабильные к/с, чем детализация. QVGA/VGA — рабочий выбор.
+//  Camera. For FPV the resolution is deliberately NOT the maximum: low latency
+//  and steady fps matter more than detail. QVGA/VGA is the practical choice.
 // ---------------------------------------------------------------------------
 bool initCamera() {
   camera_config_t cfg = {};
@@ -165,12 +165,12 @@ bool initCamera() {
   cfg.ledc_timer   = LEDC_TIMER_0;
   cfg.ledc_channel = LEDC_CHANNEL_0;
 
-  cfg.pixel_format = PIXFORMAT_RGB565;   // GC2145 не отдаёт JPEG — жмём программно
-  cfg.jpeg_quality = 12;                 // при RGB565 не используется
+  cfg.pixel_format = PIXFORMAT_RGB565;   // GC2145 doesn't output JPEG — we compress in software
+  cfg.jpeg_quality = 12;                 // unused with RGB565
 
   if (psramFound()) {
-    // Для FPV важнее задержка, чем детализация, а сжатие у нас процессорное
-    // (см. урок 23) — поэтому QVGA, а не VGA.
+    // For FPV latency matters more than detail, and our compression is done by the CPU
+    // (see lesson 23) — hence QVGA, not VGA.
     cfg.frame_size  = FRAMESIZE_QVGA;     // 320x240
     cfg.fb_count    = 2;
     cfg.fb_location = CAMERA_FB_IN_PSRAM;
@@ -179,7 +179,7 @@ bool initCamera() {
     cfg.fb_count    = 1;
     cfg.fb_location = CAMERA_FB_IN_DRAM;
   }
-  cfg.grab_mode = CAMERA_GRAB_LATEST;      // для FPV критично: только свежий кадр
+  cfg.grab_mode = CAMERA_GRAB_LATEST;      // critical for FPV: only the freshest frame
 
   esp_err_t err = esp_camera_init(&cfg);
   if (err != ESP_OK) {
@@ -190,9 +190,9 @@ bool initCamera() {
 }
 
 // ---------------------------------------------------------------------------
-//  FPV-страница. Пульт повторяет команду каждые REPEAT мс, пока кнопка или
-//  клавиша удерживается, и шлёт stop на отпускание — это ровно то поведение,
-//  под которое в уроке 21 сделан failsafe (нет команд 700 мс -> моторы стоп).
+//  FPV page. The remote repeats the command every REPEAT ms while a button or
+//  key is held, and sends stop on release — exactly the behaviour that
+//  lesson 21's failsafe was built for (no commands for 700 ms -> motors stop).
 // ---------------------------------------------------------------------------
 static const char PAGE_HTML[] = R"HTML(
 <!doctype html><html lang="ru"><head><meta charset="utf-8">
@@ -226,7 +226,7 @@ static const char PAGE_HTML[] = R"HTML(
 <p style="color:#888;font-size:13px">Клавиши: W/A/S/D или стрелки. Пока кнопка нажата,
 команда уходит каждые 300 мс; на отпускание уходит stop.</p>
 <script>
-const REPEAT=300;                       // мс; на роботе failsafe 700 мс
+const REPEAT=300;                       // ms; the robot's failsafe is 700 ms
 let timer=null, current=null;
 const cam=document.getElementById('cam');
 function open_(){ cam.src='http://'+location.hostname+':81/stream?t='+Date.now(); }
@@ -255,7 +255,7 @@ const KEYS={ArrowUp:'forward',ArrowDown:'back',ArrowLeft:'left',ArrowRight:'righ
             w:'forward',s:'back',a:'left',d:'right',' ':'stop'};
 addEventListener('keydown',e=>{ const c=KEYS[e.key]; if(c){e.preventDefault();start(c);} });
 addEventListener('keyup',  e=>{ if(KEYS[e.key]) release(); });
-// Ушли со страницы с зажатой кнопкой — робот не должен уехать.
+// Left the page with a button held — the robot must not drive off.
 addEventListener('blur',release);
 
 setInterval(async()=>{
@@ -281,7 +281,7 @@ static esp_err_t indexHandler(httpd_req_t* req) {
 }
 
 // ---------------------------------------------------------------------------
-//  Стрим — как в уроке 24.
+//  Stream — as in lesson 24.
 // ---------------------------------------------------------------------------
 static esp_err_t streamHandler(httpd_req_t* req) {
   esp_err_t res = httpd_resp_set_type(req, STREAM_CONTENT_TYPE);
@@ -299,12 +299,12 @@ static esp_err_t streamHandler(httpd_req_t* req) {
     if (!fb) { res = ESP_FAIL; break; }
     int64_t t1 = esp_timer_get_time();
 
-    // Сенсор GC2145 отдаёт сырой RGB565, готового JPEG у него нет — жмём сами
-    // (тот же frame2jpg, что в уроке 23). Это и есть главный ограничитель к/с.
+    // The GC2145 sensor outputs raw RGB565, it has no ready JPEG — we compress it ourselves
+    // (the same frame2jpg as in lesson 23). This is the main fps limiter.
     uint8_t* jpg = nullptr;
     size_t   jpg_len = 0;
     bool ok = frame2jpg(fb, JPEG_QUALITY, &jpg, &jpg_len);
-    esp_camera_fb_return(fb);          // сырой кадр драйверу больше не нужен
+    esp_camera_fb_return(fb);          // the driver no longer needs the raw frame
     if (!ok) { res = ESP_FAIL; break; }
     int64_t t2 = esp_timer_get_time();
 
@@ -318,10 +318,10 @@ static esp_err_t streamHandler(httpd_req_t* req) {
 
     windowFrames++;
     windowBytes += jpg_len;
-    accGrab += t1 - t0;                // ждали сенсор
-    accJpeg += t2 - t1;                // жгли процессор
-    accSend += t3 - t2;                // ждали сеть
-    free(jpg);                         // буфер от frame2jpg наш
+    accGrab += t1 - t0;                // waited for the sensor
+    accJpeg += t2 - t1;                // burned CPU
+    accSend += t3 - t2;                // waited for the network
+    free(jpg);                         // the frame2jpg buffer is ours
     if (res != ESP_OK) break;
 
     int64_t now = esp_timer_get_time();
@@ -346,13 +346,13 @@ static esp_err_t streamHandler(httpd_req_t* req) {
 }
 
 // ---------------------------------------------------------------------------
-//  /drive?cmd=... — единственная "рулевая" ручка.
-//  ВНИМАНИЕ: здесь мы НЕ публикуем в MQTT. Этот код исполняется в задаче
-//  esp_http_server, а PubSubClient не потокобезопасен — publish из двух задач
-//  ломает его буфер. Кладём команду в очередь; publish сделает loop().
+//  /drive?cmd=... — the only "steering" endpoint.
+//  NOTE: we do NOT publish to MQTT here. This code runs in the
+//  esp_http_server task, and PubSubClient is not thread-safe — publishing from two
+//  tasks corrupts its buffer. We put the command in a queue; loop() does the publish.
 //
-//  Аллоу-лист дублирует бэкендовый (RobotEndpoints) и прошивку робота: лучше
-//  отбить мусор здесь, чем гонять его через брокер.
+//  The allow-list duplicates the backend's (RobotEndpoints) and the robot firmware's:
+//  better to reject garbage here than to push it through the broker.
 // ---------------------------------------------------------------------------
 static bool isAllowed(const char* cmd) {
   return !strcmp(cmd, "forward") || !strcmp(cmd, "back") ||
@@ -376,13 +376,13 @@ static esp_err_t driveHandler(httpd_req_t* req) {
     return ESP_FAIL;
   }
 
-  // Таймаут 0: если очередь переполнена (брокер отвалился), команду лучше
-  // выбросить, чем задержать HTTP-обработчик и весь стрим.
+  // Timeout 0: if the queue is full (the broker dropped off), it's better to throw
+  // the command away than to hold up the HTTP handler and the whole stream.
   bool queued = cmdQueue && xQueueSend(cmdQueue, &msg, 0) == pdTRUE;
 
   httpd_resp_set_type(req, "text/plain");
-  // 202 по смыслу как у бэкенда: команда ПРИНЯТА, но робот — не мы, и он
-  // вправе её не исполнить (например при активной защите по наклону).
+  // 202 means the same as on the backend: the command was ACCEPTED, but the robot isn't us,
+  // and it is entitled not to execute it (e.g. while the tilt guard is active).
   httpd_resp_set_status(req, queued ? "202 Accepted" : "503 Service Unavailable");
   return httpd_resp_send(req, queued ? "queued" : "queue full", HTTPD_RESP_USE_STRLEN);
 }
@@ -428,14 +428,14 @@ void startServers() {
 }
 
 // ---------------------------------------------------------------------------
-//  MQTT. Камера — такой же участник шины, как робот: и publish, и subscribe.
+//  MQTT. The camera is the same kind of bus participant as the robot: both publish and subscribe.
 // ---------------------------------------------------------------------------
 void onMessage(char* topic, byte* payload, unsigned int length) {
   String body;
   for (unsigned int i = 0; i < length; i++) body += (char)payload[i];
   body.trim();
 
-  // Единственная подписка — защита по наклону робота из урока 22.
+  // The only subscription — the robot's tilt guard from lesson 22.
   if (!strcmp(topic, TOPIC_GUARD)) {
     robotGuard = body.toInt();
     Serial.printf("[MQTT] <- guard = %d\n", robotGuard);
@@ -449,10 +449,10 @@ void mqttReconnect() {
     Serial.println("OK");
     mqtt.subscribe(TOPIC_GUARD, 1);
   } else {
-    // state(): -2 = сеть, 4 = логин/пароль, 5 = не авторизован.
+    // state(): -2 = network, 4 = login/password, 5 = not authorized.
     Serial.printf("ошибка, state=%d\n", mqtt.state());
-    // Никакого delay(3000): здесь он затормозил бы только loop(), но зачем —
-    // стрим живёт в своей задаче, а вот телеметрию мы бы задержали.
+    // No delay(3000): here it would only slow down loop(), but why bother —
+    // the stream lives in its own task, whereas the telemetry would get delayed.
   }
 }
 
@@ -464,13 +464,13 @@ void publishNumber(const char* topic, float value) {
 
 void setup() {
   Serial.begin(115200);
-  delay(1500);      // нативному USB нужно время подняться, иначе первые строки теряются
+  delay(1500);      // native USB needs time to come up, otherwise the first lines are lost
   Serial.println("\n=== Урок 26. FPV-машинка (ESP32-S3-CAM + робот из урока 22) ===");
 
   statusLed(true);
   flashInit();
 
-  // Очередь на 8 команд: пульт шлёт максимум ~3 в секунду, запас достаточный.
+  // Queue for 8 commands: the remote sends at most ~3 per second, plenty of headroom.
   cmdQueue = xQueueCreate(8, sizeof(cmd_msg_t));
 
   if (!initCamera()) {
@@ -497,12 +497,12 @@ void setup() {
 }
 
 void loop() {
-  // 1) Держим MQTT живым. Без mqtt.loop() не работают ни подписки, ни keep-alive.
+  // 1) Keep MQTT alive. Without mqtt.loop() neither subscriptions nor keep-alive work.
   mqttReconnect();
   mqtt.loop();
 
-  // 2) Разгружаем очередь команд из HTTP-задачи. Публикуем ТОЛЬКО здесь —
-  //    один поток, один PubSubClient.
+  // 2) Drain the command queue from the HTTP task. Publish ONLY here —
+  //    one thread, one PubSubClient.
   cmd_msg_t msg;
   while (cmdQueue && xQueueReceive(cmdQueue, &msg, 0) == pdTRUE) {
     if (mqtt.connected() && mqtt.publish(TOPIC_DRIVE, msg.text)) {
@@ -513,8 +513,8 @@ void loop() {
     }
   }
 
-  // 3) Своя телеметрия раз в 2 с: те же голые числа, тот же конвейер, что у
-  //    робота, только device = esp32cam. Бэкенд менять не пришлось.
+  // 3) Own telemetry every 2 s: the same bare numbers, the same pipeline as the
+  //    robot, only device = esp32cam. The backend didn't need changes.
   unsigned long now = millis();
   if (now - lastTelemetry >= TELEMETRY_INTERVAL) {
     lastTelemetry = now;
@@ -524,5 +524,5 @@ void loop() {
     }
   }
 
-  delay(10);   // не крутим loop() вхолостую на полной скорости
+  delay(10);   // don't spin loop() idle at full speed
 }

@@ -22,13 +22,13 @@ void setup() {
 }
 
 void loop() {
-    // Бегущая строка каждые 250 мс
+    // Scrolling text every 250 ms
     static int pos = 0;
     lcd.setCursor(0, 0);
     lcd.print(text.substring(pos, pos + 16));
     pos = (pos + 1) % (text.length() - 15);
 
-    // Читаем DHT раз в 2 секунды
+    // Read the DHT once every 2 seconds
     if (millis() - lastDhtRead >= 2000) {
         lastDhtRead = millis();
 
@@ -41,7 +41,7 @@ void loop() {
     Serial.print(h);
     Serial.println();
 
-    // Отображаем последние полученные значения
+    // Display the last values received
     lcd.setCursor(0, 1);
     if (!isnan(t) && !isnan(h)) {
         lcd.print("T:");

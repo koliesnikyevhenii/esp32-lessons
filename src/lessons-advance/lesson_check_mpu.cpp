@@ -1,51 +1,51 @@
 // ============================================================================
-//  CHECK: MPU6050 / MPU6500 — проверка датчика перед уроком 20
+//  CHECK: MPU6050 / MPU6500 — sensor check before lesson 20
 // ----------------------------------------------------------------------------
-//  Цель: убедиться, что датчик подключён и живой, ДО того как подмешивать
-//  Wi-Fi/MQTT (урок 20). Никакой сети и никакой библиотеки — только I2C и Serial.
+//  Goal: make sure the sensor is connected and alive BEFORE mixing in
+//  Wi-Fi/MQTT (lesson 20). No network and no library — only I2C and Serial.
 //
-//  ВАЖНО про чип: под именем «MPU6050» часто продают MPU6500 (WHO_AM_I = 0x70)
-//  или MPU9250 (0x71). Adafruit_MPU6050 строго проверяет WHO_AM_I == 0x68 и
-//  такие чипы отвергает. Поэтому здесь читаем регистры НАПРЯМУЮ — базовая карта
-//  (акселерометр/гироскоп/температура/PWR_MGMT) у всего семейства одинаковая,
-//  так что этот скетч одинаково работает и с MPU6050, и с MPU6500/9250.
+//  IMPORTANT about the chip: an MPU6500 (WHO_AM_I = 0x70) or MPU9250 (0x71) is
+//  often sold under the name "MPU6050". Adafruit_MPU6050 strictly checks
+//  WHO_AM_I == 0x68 and rejects such chips. So here we read registers DIRECTLY — the
+//  base map (accelerometer/gyroscope/temperature/PWR_MGMT) is the same across the
+//  whole family, so this sketch works equally with the MPU6050 and the MPU6500/9250.
 //
-//  Что делает:
-//    • сканирует шину I2C и печатает найденные адреса (ждём 0x68, иногда 0x69);
-//    • печатает WHO_AM_I, чтобы было видно реальную модель чипа;
-//    • будит датчик (PWR_MGMT_1 = 0) и раз в 500 мс читает 14 байт данных;
-//    • печатает ускорения (g), гироскоп (°/с), температуру и углы pitch/roll.
+//  What it does:
+//    • scans the I2C bus and prints the addresses found (expect 0x68, sometimes 0x69);
+//    • prints WHO_AM_I so the real chip model is visible;
+//    • wakes the sensor (PWR_MGMT_1 = 0) and reads 14 data bytes every 500 ms;
+//    • prints accelerations (g), gyro (°/s), temperature and pitch/roll angles.
 //
-//  Как читать вывод:
-//    • датчик лежит ровно на столе -> az ≈ +1.0 g, ax/ay ≈ 0, pitch/roll ≈ 0;
-//    • наклоняешь вбок           -> меняется roll;
-//    • наклоняешь вперёд/назад   -> меняется pitch;
-//    • gx/gy/gz ≈ 0 в покое, растут при вращении.
+//  How to read the output:
+//    • sensor lying flat on the table -> az ≈ +1.0 g, ax/ay ≈ 0, pitch/roll ≈ 0;
+//    • tilt it sideways               -> roll changes;
+//    • tilt it forward/back           -> pitch changes;
+//    • gx/gy/gz ≈ 0 at rest, grow when rotating.
 //
-//  Сборка/прошивка:
+//  Build/flash:
 //    pio run -e lesson_check_mpu -t upload
 //    pio device monitor
 //
-//  Подключение (см. include/pins.h): SDA -> GPIO32, SCL -> GPIO33, VCC -> 3.3V,
-//  GND -> GND. AD0 -> GND даёт адрес 0x68 (по умолчанию), AD0 -> 3.3V -> 0x69.
+//  Wiring (see include/pins.h): SDA -> GPIO32, SCL -> GPIO33, VCC -> 3.3V,
+//  GND -> GND. AD0 -> GND gives address 0x68 (default), AD0 -> 3.3V -> 0x69.
 // ============================================================================
 
 #include <Arduino.h>
 #include <Wire.h>
 #include "pins.h"
 
-// ---- Адрес и регистры (одинаковы для MPU6050 / MPU6500 / MPU9250) ----------
+// ---- Address and registers (same for MPU6050 / MPU6500 / MPU9250) ----------
 const uint8_t MPU_ADDR    = 0x68;   // AD0 -> GND
 const uint8_t REG_WHOAMI  = 0x75;
-const uint8_t REG_PWRMGMT = 0x6B;   // бит 6 = SLEEP; пишем 0 -> будим датчик
-const uint8_t REG_ACCEL_X = 0x3B;   // с 0x3B идут 14 байт: accel(6)+temp(2)+gyro(6)
+const uint8_t REG_PWRMGMT = 0x6B;   // bit 6 = SLEEP; write 0 -> wake the sensor
+const uint8_t REG_ACCEL_X = 0x3B;   // from 0x3B come 14 bytes: accel(6)+temp(2)+gyro(6)
 
-// Чувствительность при диапазонах по умолчанию (±2g, ±250°/с):
-const float ACCEL_LSB = 16384.0f;   // LSB на 1 g
-const float GYRO_LSB  = 131.0f;     // LSB на 1 °/с
+// Sensitivity at the default ranges (±2g, ±250°/s):
+const float ACCEL_LSB = 16384.0f;   // LSB per 1 g
+const float GYRO_LSB  = 131.0f;     // LSB per 1 °/s
 
 // ---------------------------------------------------------------------------
-//  Записать один байт в регистр датчика.
+//  Write one byte to a sensor register.
 // ---------------------------------------------------------------------------
 void writeReg(uint8_t reg, uint8_t value) {
   Wire.beginTransmission(MPU_ADDR);
@@ -55,19 +55,19 @@ void writeReg(uint8_t reg, uint8_t value) {
 }
 
 // ---------------------------------------------------------------------------
-//  Прочитать один регистр (для WHO_AM_I).
+//  Read one register (for WHO_AM_I).
 // ---------------------------------------------------------------------------
 uint8_t readReg(uint8_t reg) {
   Wire.beginTransmission(MPU_ADDR);
   Wire.write(reg);
-  Wire.endTransmission(false);       // repeated start, шину не отпускаем
+  Wire.endTransmission(false);       // repeated start, don't release the bus
   Wire.requestFrom((int)MPU_ADDR, 1);
   return Wire.available() ? Wire.read() : 0xFF;
 }
 
 // ---------------------------------------------------------------------------
-//  Сканер шины I2C: если тут вообще ничего не найдено — проблема в проводах/
-//  питании, а не в коде.
+//  I2C bus scanner: if nothing at all is found here — the problem is in the
+//  wires/power, not in the code.
 // ---------------------------------------------------------------------------
 void scanI2C() {
   Serial.println("[I2C] Сканирование шины...");
@@ -105,7 +105,7 @@ void setup() {
     default:   Serial.println("-> неизвестный чип"); break;
   }
 
-  // Будим датчик: PWR_MGMT_1 = 0 (снимаем бит SLEEP).
+  // Wake the sensor: PWR_MGMT_1 = 0 (clear the SLEEP bit).
   writeReg(REG_PWRMGMT, 0x00);
   delay(100);
 
@@ -113,8 +113,8 @@ void setup() {
 }
 
 void loop() {
-  // Одним запросом читаем 14 байт начиная с 0x3B:
-  //   ax,ay,az (по 2 байта), temp (2), gx,gy,gz (по 2 байта).
+  // Read 14 bytes starting at 0x3B in one request:
+  //   ax,ay,az (2 bytes each), temp (2), gx,gy,gz (2 bytes each).
   Wire.beginTransmission(MPU_ADDR);
   Wire.write(REG_ACCEL_X);
   Wire.endTransmission(false);
@@ -126,7 +126,7 @@ void loop() {
     return;
   }
 
-  // Каждое значение — знаковое 16-битное (big-endian: сначала старший байт).
+  // Each value is signed 16-bit (big-endian: high byte first).
   int16_t rawAx = (Wire.read() << 8) | Wire.read();
   int16_t rawAy = (Wire.read() << 8) | Wire.read();
   int16_t rawAz = (Wire.read() << 8) | Wire.read();
@@ -135,17 +135,17 @@ void loop() {
   int16_t rawGy = (Wire.read() << 8) | Wire.read();
   int16_t rawGz = (Wire.read() << 8) | Wire.read();
 
-  // Переводим в физические единицы.
+  // Convert to physical units.
   float ax = rawAx / ACCEL_LSB;   // g
   float ay = rawAy / ACCEL_LSB;
   float az = rawAz / ACCEL_LSB;
-  float gx = rawGx / GYRO_LSB;    // °/с
+  float gx = rawGx / GYRO_LSB;    // °/s
   float gy = rawGy / GYRO_LSB;
   float gz = rawGz / GYRO_LSB;
-  // Температура: формула MPU6500 (у MPU6050 чуть иначе, для проверки не важно).
+  // Temperature: MPU6500 formula (slightly different on the MPU6050, doesn't matter for a check).
   float tempC = rawT / 340.0f + 36.53f;
 
-  // Углы наклона из вектора силы тяжести (в градусах).
+  // Tilt angles from the gravity vector (in degrees).
   float roll  = atan2f(ay, az) * 180.0f / PI;
   float pitch = atan2f(-ax, sqrtf(ay * ay + az * az)) * 180.0f / PI;
 

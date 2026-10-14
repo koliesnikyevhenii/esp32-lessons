@@ -3,16 +3,16 @@
 #define SIM_RX 27  // ESP32 RX  ← GSM TX
 #define SIM_TX 26  // ESP32 TX  → GSM RX
 
-// Строка "777" в мониторе отправляет это SMS на MY_PHONE (вместо пересылки в модуль).
+// The line "777" in the monitor sends this SMS to MY_PHONE (instead of forwarding it to the module).
 
 #define SMS_TEXT  "С Днём учителя! Тест GSM прошёл успешно."
 #define SMS_TRIGGER "777"
 
-// SIM800L по умолчанию в режиме автобода: скорость он "ловит" по первым
-// символам "AT". Поэтому перебираем типичные скорости и шлём AT несколько раз.
+// By default SIM800L is in autobaud mode: it "catches" the speed from the first
+// "AT" characters. So we try the typical speeds and send AT several times.
 const uint32_t BAUDS[] = {9600, 115200, 57600, 38400, 19200};
 
-// Шлёт "AT\r" и ждёт "OK" в ответе. Всё, что пришло, печатаем — полезно видеть мусор.
+// Sends "AT\r" and waits for "OK" in the reply. Everything received is printed — seeing garbage is useful.
 bool probe(uint32_t baud) {
     Serial1.end();
     Serial1.begin(baud, SERIAL_8N1, SIM_RX, SIM_TX);
@@ -40,7 +40,7 @@ bool probe(uint32_t baud) {
     return resp.indexOf("OK") >= 0;
 }
 
-// Ждёт в ответе модуля строку expect (или ERROR), всё пришедшее печатает в монитор.
+// Waits for the string expect (or ERROR) in the module's reply, printing everything received to the monitor.
 bool waitFor(const char* expect, uint32_t timeoutMs) {
     String resp;
     uint32_t t0 = millis();
@@ -61,8 +61,8 @@ bool atCmd(const String& cmd, const char* expect = "OK", uint32_t timeoutMs = 20
     return waitFor(expect, timeoutMs);
 }
 
-// UTF-8 → UCS2 в hex ("С" → "0421"). Кириллица в SMS идёт только так:
-// в режиме "GSM" модуль понимает лишь латиницу.
+// UTF-8 → UCS2 as hex ("С" → "0421"). Cyrillic in SMS only works this way:
+// in "GSM" mode the module understands Latin characters only.
 String toUcs2Hex(const char* s) {
     String out;
     char buf[5];
@@ -87,7 +87,7 @@ String toUcs2Hex(const char* s) {
 void sendSms(const char* phone, const char* text) {
     Serial.printf("\n>>> Отправляю SMS на %s...\n", phone);
 
-    // UCS2: и номер, и текст передаются hex-строкой UTF-16; dcs=8 в CSMP = UCS2.
+    // UCS2: both the number and the text are sent as a UTF-16 hex string; dcs=8 in CSMP = UCS2.
     bool ok = atCmd("AT+CMGF=1")
            && atCmd("AT+CSCS=\"UCS2\"")
            && atCmd("AT+CSMP=17,167,0,8")
@@ -96,13 +96,13 @@ void sendSms(const char* phone, const char* text) {
     if (ok) {
         Serial1.print(toUcs2Hex(text));
         Serial1.write(0x1A);
-        // Ответ сети при слабом сигнале может идти до минуты.
+        // With a weak signal the network reply can take up to a minute.
         ok = waitFor("+CMGS:", 60000);
     } else {
-        Serial1.write(0x1B);  // ESC: выйти из ожидания текста, если застряли на ">"
+        Serial1.write(0x1B);  // ESC: leave text-entry mode if stuck at ">"
     }
 
-    // Возвращаем режим для ручного ввода латиницей.
+    // Restore the mode for manual input in Latin characters.
     atCmd("AT+CSCS=\"GSM\"");
     atCmd("AT+CSMP=17,167,0,0");
 
@@ -113,7 +113,7 @@ void setup() {
     Serial.begin(115200);
     delay(1000);
 
-    // После подачи питания модулю нужно ~3 с на загрузку, прежде чем он ответит.
+    // After power-up the module needs ~3 s to boot before it answers.
     delay(3000);
 
     Serial.println("Ищу SIM800L...");
@@ -125,7 +125,7 @@ void setup() {
     if (found) {
         Serial.printf("Модуль отвечает на %u бод.\n", found);
     } else {
-        // Оставляем 9600 — на ней автобод срабатывает надёжнее всего.
+        // Stay at 9600 — autobaud locks on most reliably at it.
         Serial1.end();
         Serial1.begin(9600, SERIAL_8N1, SIM_RX, SIM_TX);
         Serial.println("Ответа нет ни на одной скорости: проверь питание (3.7-4.2 В, 2 А),");
@@ -135,13 +135,13 @@ void setup() {
     Serial.println("Bridge ready. '~' = Ctrl+Z, '" SMS_TRIGGER "' = тестовое SMS");
 }
 
-// Строка из монитора копится целиком, чтобы успеть узнать в ней SMS_TRIGGER
-// до того, как она уйдёт в модуль. send_on_enter и так шлёт строку разом.
+// The monitor line is buffered whole so SMS_TRIGGER can be recognised in it
+// before it goes to the module. send_on_enter sends the line in one go anyway.
 String line;
 
 void loop() {
 
-    // ПК → ESP32 → GSM
+    // PC → ESP32 → GSM
     while (Serial.available()) {
         char c = Serial.read();
         line += c;
@@ -152,13 +152,13 @@ void loop() {
         if (cmd == SMS_TRIGGER) {
             sendSms(MY_PHONE, SMS_TEXT);
         } else {
-            // Для отправки SMS '~' превращаем в Ctrl+Z
+            // To send an SMS, '~' is turned into Ctrl+Z
             for (char ch : line) Serial1.write(ch == '~' ? 0x1A : ch);
         }
         line = "";
     }
 
-    // GSM → ESP32 → ПК
+    // GSM → ESP32 → PC
     while (Serial1.available()) {
         Serial.write(Serial1.read());
     }

@@ -1,44 +1,44 @@
 // ============================================================================
-//  CHECK: Cytron MDD10A — проверка драйвера и моторов перед уроком 30
+//  CHECK: Cytron MDD10A — driver and motor check before lesson 30
 // ----------------------------------------------------------------------------
-//  То же, что lesson_check_tb6612, но для нового драйвера. Никакой сети и
-//  никаких библиотек — только GPIO, LEDC и Serial.
+//  Same as lesson_check_tb6612, but for the new driver. No network and
+//  no libraries — only GPIO, LEDC and Serial.
 //
-//  MDD10A, режим sign-magnitude: на канал два входа —
-//     DIR  -> направление (HIGH/LOW),
-//     PWM  -> скорость (скважность, до 20 кГц); PWM = 0 — ТОРМОЗ.
+//  MDD10A, sign-magnitude mode: two inputs per channel —
+//     DIR  -> direction (HIGH/LOW),
+//     PWM  -> speed (duty cycle, up to 20 kHz); PWM = 0 is a BRAKE.
 //
-//  ДО ПРОШИВКИ: на самой плате MDD10A есть кнопки теста (M1A/M1B/M2A/M2B) —
-//  нажми их при поданном питании моторов. Колёса крутятся -> силовая часть и
-//  моторы исправны, дальше ищем только в проводах от ESP32.
+//  BEFORE FLASHING: the MDD10A board itself has test buttons (M1A/M1B/M2A/M2B) —
+//  press them with motor power applied. Wheels turn -> the power stage and
+//  motors are fine, from here on only look at the wires from the ESP32.
 //
-//  Как читать результат (канал 1 = левый, канал 2 = правый):
-//    • «L forward» -> левое колесо едет ВПЕРЁД. Если назад — поставь
-//      MOTOR_LEFT_INVERT = true (здесь и в уроке 30) или поменяй M1A/M1B.
-//    • крутится не то колесо -> перепутаны каналы 1/2 (или провода моторов).
-//    • рампа: колесо стартует только с высокой скважности -> тугая механика или
-//      просаживается батарея; SPEED_MANUAL/SPEED_AUTO в уроке 30 подними.
+//  How to read the result (channel 1 = left, channel 2 = right):
+//    • "L forward" -> the left wheel drives FORWARD. If backwards — set
+//      MOTOR_LEFT_INVERT = true (here and in lesson 30) or swap M1A/M1B.
+//    • the wrong wheel turns -> channels 1/2 are swapped (or the motor wires).
+//    • ramp: the wheel starts only at a high duty cycle -> stiff mechanics or
+//      a sagging battery; raise SPEED_MANUAL/SPEED_AUTO in lesson 30.
 //
-//  БЕЗОПАСНОСТЬ: колёса над столом, иначе робот уедет во время теста.
+//  SAFETY: wheels off the table, otherwise the robot drives off during the test.
 //
-//  Сборка: pio run -e lesson_check_mdd10 -t upload && pio device monitor
+//  Build: pio run -e lesson_check_mdd10 -t upload && pio device monitor
 // ============================================================================
 
 #include <Arduino.h>
 #include "pins.h"
 
-const uint32_t PWM_HZ   = 20000;      // как в уроке 30
+const uint32_t PWM_HZ   = 20000;      // as in lesson 30
 const uint8_t  PWM_BITS = 8;
 const int SPEED = 200;
 const unsigned long STEP_MS  = 1500;
-const unsigned long PAUSE_MS = 600;   // стоп между шагами — заодно пауза перед реверсом
+const unsigned long PAUSE_MS = 600;   // stop between steps — doubles as the pause before reversing
 
 const bool MOTOR_LEFT_INVERT  = false;
 const bool MOTOR_RIGHT_INVERT = true;
 
 void motor(uint8_t dirPin, uint8_t ch, bool invert, int dir) {
-  if (dir == 0) { ledcWrite(ch, 0); return; }        // тормоз
-  ledcWrite(ch, 0);                                  // DIR меняем при нулевом PWM
+  if (dir == 0) { ledcWrite(ch, 0); return; }        // brake
+  ledcWrite(ch, 0);                                  // change DIR at zero PWM
   digitalWrite(dirPin, ((dir > 0) != invert) ? HIGH : LOW);
   ledcWrite(ch, SPEED);
 }
@@ -56,7 +56,7 @@ void step(const char* label, int l, int r) {
   delay(PAUSE_MS);
 }
 
-// Рампа скважности на одном канале: с какого значения колесо трогается.
+// Duty-cycle ramp on one channel: at what value the wheel starts moving.
 void ramp(const char* name, uint8_t dirPin, uint8_t ch) {
   digitalWrite(dirPin, HIGH);
   for (int duty : { 60, 100, 140, 180, 220, 255 }) {
@@ -98,7 +98,7 @@ void loop() {
 
   step("forward",   +1, +1);
   step("back",      -1, -1);
-  step("left",      -1, +1);   // разворот на месте
+  step("left",      -1, +1);   // spin in place
   step("right",     +1, -1);
 
   Serial.println("[TEST] круг завершён, повтор через 2 c\n");

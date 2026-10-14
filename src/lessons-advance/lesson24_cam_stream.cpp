@@ -1,51 +1,51 @@
 // ============================================================================
-//  Этап 6. Камера — урок 24: видеопоток MJPEG в браузере
+//  Stage 6. Camera — lesson 24: an MJPEG video stream in the browser
 // ----------------------------------------------------------------------------
-//  Цель: превратить "фотоаппарат" из урока 23 в ВИДЕО. Никакого H.264 и WebRTC:
-//  ESP32 отдаёт поток MJPEG — бесконечную последовательность обычных JPEG-кадров
-//  в одном HTTP-ответе. Браузер умеет показывать такой ответ в теге <img> сам,
-//  без единой строчки видео-кода.
+//  Goal: turn the "camera" from lesson 23 into VIDEO. No H.264 and no WebRTC:
+//  the ESP32 serves an MJPEG stream — an endless sequence of ordinary JPEG frames
+//  in a single HTTP response. The browser can show such a response in an <img> tag
+//  on its own, without a single line of video code.
 //
-//     Браузер --GET :81/stream--> ESP32-CAM ...кадр...кадр...кадр... (не закрывая ответ)
+//     Browser --GET :81/stream--> ESP32-CAM ...frame...frame...frame... (never closing the response)
 //
-//  Что изучаем:
-//    - multipart/x-mixed-replace — "заменяй предыдущую часть следующей". Это и есть
-//      весь секрет MJPEG: один ответ, много частей, каждая часть = целый JPEG;
-//    - chunked-передача: httpd_resp_send_chunk() в цикле, ответ не завершается;
-//    - почему WebServer из уроков 17 и 23 здесь не годится и мы берём
-//      esp_http_server: обработчик стрима НИКОГДА не возвращает управление, а
-//      синхронный WebServer живёт внутри loop() — он бы заблокировал всё разом;
-//    - ДВА сервера на двух портах (80 — страница и кнопки, 81 — стрим): пока
-//      воркер занят бесконечным стримом, обычные запросы на этот же сервер
-//      будут ждать в очереди. Ровно так сделано в примере CameraWebServer;
-//    - цена разрешения: сравни к/с на QVGA / VGA / SVGA. На нашей плате стоит
-//      сенсор GC2145 без аппаратного JPEG, поэтому кадр жмёт процессор
-//      (frame2jpg, как в уроке 23) — упрёмся мы именно в сжатие, а не в Wi-Fi;
-//    - CAMERA_GRAB_LATEST — отдавать самый свежий кадр, чтобы видео не отставало;
-//    - ПОЧЕМУ разрешение меняется переинициализацией камеры: буферы кадра
-//      выделяются один раз, в esp_camera_init(), под cfg.frame_size, а
-//      set_framesize() правит только регистры сенсора. На RGB565 это видно
-//      сразу — кадр не лезет в старый буфер и распадается на полосы.
+//  What we learn:
+//    - multipart/x-mixed-replace — "replace the previous part with the next one". That is
+//      the whole secret of MJPEG: one response, many parts, each part = a whole JPEG;
+//    - chunked transfer: httpd_resp_send_chunk() in a loop, the response never completes;
+//    - why the WebServer from lessons 17 and 23 won't do here and we use
+//      esp_http_server: the stream handler NEVER returns control, and the
+//      synchronous WebServer lives inside loop() — it would block everything at once;
+//    - TWO servers on two ports (80 — page and buttons, 81 — stream): while a
+//      worker is busy with the endless stream, ordinary requests to the same server
+//      would wait in a queue. This is exactly how the CameraWebServer example does it;
+//    - the cost of resolution: compare fps at QVGA / VGA / SVGA. Our board carries a
+//      GC2145 sensor without hardware JPEG, so the CPU compresses each frame
+//      (frame2jpg, as in lesson 23) — the bottleneck is compression, not Wi-Fi;
+//    - CAMERA_GRAB_LATEST — serve the freshest frame so the video doesn't lag;
+//    - WHY resolution is changed by re-initialising the camera: frame buffers are
+//      allocated once, in esp_camera_init(), for cfg.frame_size, while
+//      set_framesize() only touches the sensor registers. With RGB565 this shows
+//      immediately — the frame doesn't fit the old buffer and breaks into stripes.
 //
-//  Эндпоинты:
-//    :80/            HTML: <img> со стримом, к/с, выбор разрешения, вспышка
+//  Endpoints:
+//    :80/            HTML: <img> with the stream, fps, resolution choice, flash
 //    :80/stats       JSON: {"fps":..,"kbps":..,"clients":..,"rssi":..,"heap":..}
-//    :80/size?v=N    разрешение (5=QVGA, 8=VGA, 9=SVGA, 13=UXGA) — с переинициализацией
-//    :80/flash?v=0..255  вспышка
-//    :81/stream      сам MJPEG-поток
+//    :80/size?v=N    resolution (5=QVGA, 8=VGA, 9=SVGA, 13=UXGA) — with re-initialisation
+//    :80/flash?v=0..255  flash
+//    :81/stream      the MJPEG stream itself
 //
-//  Сборка/прошивка:
+//  Build/flash:
 //    pio run -e lesson24_cam_stream -t upload
-//    pio device monitor        # напечатает IP -> открой http://IP/ в браузере
+//    pio device monitor        # prints the IP -> open http://IP/ in the browser
 //
-//  Плата: HW-679 ESP32-S3-CAM (board = esp32-s3-devkitc-1 + memory_type = qio_opi).
-//  Пины — include/pins.h (блок CAM_*).
+//  Board: HW-679 ESP32-S3-CAM (board = esp32-s3-devkitc-1 + memory_type = qio_opi).
+//  Pins — include/pins.h (the CAM_* block).
 // ============================================================================
 
 #include <Arduino.h>
 #include <WiFi.h>
 #include "esp_camera.h"
-#include "img_converters.h"   // frame2jpg(): программное сжатие RGB565 -> JPEG
+#include "img_converters.h"   // frame2jpg(): software RGB565 -> JPEG compression
 #include "esp_http_server.h"
 #include "esp_timer.h"
 #include "pins.h"
@@ -54,48 +54,48 @@
 const char* SSID = "Vektor_04";
 const char* PASS = "uteam2020";
 
-// GC2145 (сенсор на нашей плате) аппаратного JPEG не умеет, кадр жмётся
-// программно через frame2jpg — а у неё шкала 0..100 и БОЛЬШЕ = лучше.
+// GC2145 (the sensor on our board) can't do hardware JPEG, the frame is compressed
+// in software via frame2jpg — and its scale is 0..100 where HIGHER = better.
 const int JPEG_QUALITY = 80;
 
-// ---- Границы MJPEG ---------------------------------------------------------
-// Разделитель может быть любой строкой, которой точно нет в бинарных данных.
+// ---- MJPEG boundaries -------------------------------------------------------
+// The separator can be any string that is guaranteed not to occur in the binary data.
 #define PART_BOUNDARY "esp32camframe"
 static const char* STREAM_CONTENT_TYPE = "multipart/x-mixed-replace;boundary=" PART_BOUNDARY;
 static const char* STREAM_BOUNDARY     = "\r\n--" PART_BOUNDARY "\r\n";
 static const char* STREAM_PART         = "Content-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n";
 
-// ---- Два сервера: страница и поток ----------------------------------------
-httpd_handle_t webServer    = NULL;   // порт 80
-httpd_handle_t streamServer = NULL;   // порт 81
+// ---- Two servers: page and stream -----------------------------------------
+httpd_handle_t webServer    = NULL;   // port 80
+httpd_handle_t streamServer = NULL;   // port 81
 
-// ---- Статистика (её считает сам стрим-обработчик) --------------------------
-volatile float    streamFps   = 0;    // кадров в секунду
-volatile float    streamKbps  = 0;    // килобит в секунду
-volatile int      streamClients = 0;  // сколько стримов открыто прямо сейчас
+// ---- Statistics (computed by the stream handler itself) --------------------
+volatile float    streamFps   = 0;    // frames per second
+volatile float    streamKbps  = 0;    // kilobits per second
+volatile int      streamClients = 0;  // how many streams are open right now
 
-// ---- Разрешение: почему его нельзя менять "на ходу" ------------------------
-// Драйвер esp32-camera считает геометрию кадра ОДИН раз — в esp_camera_init():
-// cam_config() запоминает width/height и выделяет буферы ровно под этот размер.
-// А sensor_t::set_framesize() — функция драйвера СЕНСОРА: она пишет регистры
-// GC2145 и про буферы не знает ничего. В режиме JPEG это ещё сходило бы с рук
-// (JPEG самодостаточен, размер лежит внутри кадра), но у нас RGB565: frame2jpg()
-// читает fb->width/height, которые остались прежними, а сенсор уже гонит строки
-// другой длины. Результат — ровно те самые полосы и чёрный низ кадра.
-// Поэтому разрешение меняем ПЕРЕИНИЦИАЛИЗАЦИЕЙ камеры: deinit + init.
-static framesize_t       camSize = FRAMESIZE_QVGA;   // что стоит прямо сейчас
-static SemaphoreHandle_t camLock = NULL;             // у камеры один хозяин за раз
+// ---- Resolution: why it can't be changed "on the fly" -----------------------
+// The esp32-camera driver computes the frame geometry ONCE — in esp_camera_init():
+// cam_config() stores width/height and allocates buffers for exactly that size.
+// And sensor_t::set_framesize() is a SENSOR driver function: it writes GC2145
+// registers and knows nothing about the buffers. In JPEG mode we'd still get away
+// with it (JPEG is self-contained, the size is inside the frame), but we use RGB565:
+// frame2jpg() reads fb->width/height, which stayed the same, while the sensor already
+// emits rows of a different length. The result is exactly those stripes and a black bottom.
+// So we change resolution by RE-INITIALISING the camera: deinit + init.
+static framesize_t       camSize = FRAMESIZE_QVGA;   // what is set right now
+static SemaphoreHandle_t camLock = NULL;             // the camera has one owner at a time
 
-// RGB565 — 2 байта на пиксель, и буфер выделяется целиком:
-//   QVGA 150 КБ | VGA 600 КБ | SVGA 938 КБ | XGA 1,5 МБ | UXGA 3,7 МБ.
-// Два UXGA-буфера (7,3 МБ) в 8 МБ PSRAM вместе с Wi-Fi и выходным буфером
-// frame2jpg уже не живут, поэтому на больших кадрах берём одинарную буферизацию.
+// RGB565 is 2 bytes per pixel, and the buffer is allocated in full:
+//   QVGA 150 KB | VGA 600 KB | SVGA 938 KB | XGA 1.5 MB | UXGA 3.7 MB.
+// Two UXGA buffers (7.3 MB) no longer fit in 8 MB of PSRAM alongside Wi-Fi and the
+// frame2jpg output buffer, so on large frames we use single buffering.
 static size_t fbCountFor(framesize_t fs) {
   return (fs <= FRAMESIZE_SVGA) ? 2 : 1;
 }
 
 // ---------------------------------------------------------------------------
-//  Подсветка и индикатор (на S3-платах пины не стандартизованы -> в pins.h -1).
+//  Flash light and status indicator (pins aren't standardised on S3 boards -> -1 in pins.h).
 // ---------------------------------------------------------------------------
 void flashInit() {
 #if CAM_FLASH_LED >= 0
@@ -123,7 +123,7 @@ void statusLed(bool on) {
 }
 
 // ---------------------------------------------------------------------------
-//  Инициализация камеры. Отличие от урока 23 — grab_mode.
+//  Camera initialisation. The difference from lesson 23 is grab_mode.
 // ---------------------------------------------------------------------------
 bool initCamera(framesize_t fs) {
   camera_config_t cfg = {};
@@ -139,37 +139,37 @@ bool initCamera(framesize_t fs) {
   cfg.pin_href  = CAM_HREF;
   cfg.pin_pclk  = CAM_PCLK;
 
-  // XCLK зависит от размера кадра, и это не тонкая настройка, а условие работы.
-  // На больших кадрах шина камеры не успевает: DMA не вывозит поток пикселей в
-  // PSRAM, cam_hal начинает сыпать "EV-EOF-OVF", а fb_get() возвращает NULL —
-  // камера встаёт насмерть до следующей переинициализации. Замерено на этой
-  // плате: UXGA на 20 МГц = штурм OVF и ни одного кадра, на 10 МГц = 0,5 к/с и
-  // нормальная картинка. SXGA на 10 МГц выходит даже быстрее (0,7 против 0,4),
-  // так что это не только лекарство от OVF.
+  // XCLK depends on the frame size, and that is not fine-tuning but a requirement.
+  // On large frames the camera bus can't keep up: DMA can't push the pixel stream into
+  // PSRAM, cam_hal starts spewing "EV-EOF-OVF", and fb_get() returns NULL —
+  // the camera is dead until the next re-initialisation. Measured on this
+  // board: UXGA at 20 MHz = an OVF storm and not a single frame, at 10 MHz = 0.5 fps and
+  // a normal picture. SXGA at 10 MHz is even faster (0.7 vs 0.4),
+  // so this is not just a cure for OVF.
   cfg.xclk_freq_hz = (fs >= FRAMESIZE_XGA) ? 10000000 : 20000000;
   cfg.ledc_timer   = LEDC_TIMER_0;
   cfg.ledc_channel = LEDC_CHANNEL_0;
 
-  cfg.pixel_format = PIXFORMAT_RGB565;   // сырой кадр: сжимать будем сами
-  cfg.jpeg_quality = 12;                 // при RGB565 не используется
+  cfg.pixel_format = PIXFORMAT_RGB565;   // raw frame: we'll compress it ourselves
+  cfg.jpeg_quality = 12;                 // unused with RGB565
 
-  // Сжатие делает процессор, и его цена растёт с площадью кадра: стартуем
-  // с QVGA, а кнопки на странице переинициализируют камеру на больший кадр,
-  // чтобы можно было сравнить к/с.
+  // Compression is done by the CPU, and its cost grows with frame area: we start
+  // at QVGA, and the buttons on the page re-initialise the camera to a bigger frame
+  // so fps can be compared.
   if (psramFound()) {
     cfg.frame_size  = fs;
     cfg.fb_count    = fbCountFor(fs);
     cfg.fb_location = CAMERA_FB_IN_PSRAM;
   } else {
-    // Без PSRAM больше QVGA положить просто некуда: внутренней DRAM ~300 КБ.
+    // Without PSRAM there is simply nowhere to put more than QVGA: internal DRAM is ~300 KB.
     cfg.frame_size  = FRAMESIZE_QVGA;
     cfg.fb_count    = 1;
     cfg.fb_location = CAMERA_FB_IN_DRAM;
   }
 
-  // ВОТ ЭТО важно для видео: с CAMERA_GRAB_WHEN_EMPTY браузер получает кадры из
-  // очереди буферов и картинка отстаёт от реальности на fb_count кадров.
-  // CAMERA_GRAB_LATEST всегда берёт самый свежий — задержка меньше.
+  // THIS matters for video: with CAMERA_GRAB_WHEN_EMPTY the browser gets frames from
+  // the buffer queue and the picture lags behind reality by fb_count frames.
+  // CAMERA_GRAB_LATEST always takes the freshest one — less latency.
   cfg.grab_mode = CAMERA_GRAB_LATEST;
 
   esp_err_t err = esp_camera_init(&cfg);
@@ -177,24 +177,24 @@ bool initCamera(framesize_t fs) {
     Serial.printf("[CAM] init FAILED: 0x%x (%s)\n", err, esp_err_to_name(err));
     return false;
   }
-  camSize = cfg.frame_size;   // запомнили: applyFramesize() сверяется с этим
+  camSize = cfg.frame_size;   // remembered: applyFramesize() compares against this
   Serial.printf("[CAM] кадр #%d, буферов %u\n", (int)camSize, (unsigned)cfg.fb_count);
   return true;
 }
 // ---------------------------------------------------------------------------
-//  Смена разрешения = deinit + init (почему — см. комментарий у camSize).
-//  Вызывают её обработчики на :80, а кадры в это время тянет задача стрима
-//  на :81 — поэтому оба берут camLock: без него стрим успел бы получить fb
-//  от уже уничтоженного драйвера.
+//  Changing resolution = deinit + init (why — see the comment at camSize).
+//  It is called by the handlers on :80, while frames are being pulled by the stream
+//  task on :81 — so both take camLock: without it the stream could get an fb
+//  from an already destroyed driver.
 // ---------------------------------------------------------------------------
 static bool applyFramesize(framesize_t fs) {
-  if (!psramFound() && fs > FRAMESIZE_QVGA) return false;   // в DRAM больше не влезет
+  if (!psramFound() && fs > FRAMESIZE_QVGA) return false;   // won't fit in DRAM
   if (fs == camSize) return true;
 
   xSemaphoreTake(camLock, portMAX_DELAY);
   esp_camera_deinit();
   bool ok = initCamera(fs);
-  if (!ok) {                                  // не поднялось — откатываемся
+  if (!ok) {                                  // didn't come up — roll back
     Serial.println("[CAM] не удалось, откат на QVGA");
     ok = initCamera(FRAMESIZE_QVGA);
   }
@@ -204,8 +204,8 @@ static bool applyFramesize(framesize_t fs) {
 
 
 // ---------------------------------------------------------------------------
-//  СТРАНИЦА. Стрим лежит на другом порту, поэтому адрес собираем в браузере из
-//  location.hostname — так один и тот же HTML работает с любым IP.
+//  THE PAGE. The stream lives on another port, so the browser builds its address from
+//  location.hostname — that way the same HTML works with any IP.
 // ---------------------------------------------------------------------------
 static const char PAGE_HTML[] = R"HTML(
 <!doctype html><html lang="ru"><head><meta charset="utf-8">
@@ -232,9 +232,9 @@ static const char PAGE_HTML[] = R"HTML(
 <div class="row" id="stats">-</div>
 <script>
 const cam=document.getElementById('cam');
-// Один и тот же URL стрима браузер может взять из кеша — добавляем метку времени.
+// The browser may take the same stream URL from the cache — add a timestamp.
 function open_(){ cam.src='http://'+location.hostname+':81/stream?t='+Date.now(); }
-function size(v){ fetch('/size?v='+v).then(open_); }   // после смены размера поток надо переоткрыть
+function size(v){ fetch('/size?v='+v).then(open_); }   // after a size change the stream must be reopened
 function flash(v){ fetch('/flash?v='+v); }
 setInterval(async()=>{
   try{
@@ -254,23 +254,23 @@ static esp_err_t indexHandler(httpd_req_t* req) {
 }
 
 // ---------------------------------------------------------------------------
-//  СТРИМ. Обработчик не возвращается, пока клиент не отвалится: он крутит
-//  бесконечный while и подкладывает в тот же ответ новые кадры.
+//  THE STREAM. The handler doesn't return until the client drops off: it spins
+//  an endless while and feeds new frames into the same response.
 //
-//  Каждый кадр отдаётся тремя чанками:
-//     "\r\n--boundary\r\n"                          <- граница части
+//  Each frame is sent as three chunks:
+//     "\r\n--boundary\r\n"                          <- part boundary
 //     "Content-Type: image/jpeg\r\nContent-Length: N\r\n\r\n"
-//     <N байт JPEG>
-//  Как только httpd_resp_send_chunk() вернёт ошибку — значит браузер закрыл
-//  вкладку, и мы просто выходим из цикла.
+//     <N bytes of JPEG>
+//  As soon as httpd_resp_send_chunk() returns an error, the browser has closed the
+//  tab, and we simply leave the loop.
 // ---------------------------------------------------------------------------
 static esp_err_t streamHandler(httpd_req_t* req) {
   esp_err_t res = httpd_resp_set_type(req, STREAM_CONTENT_TYPE);
   if (res != ESP_OK) return res;
 
-  // Разрешаем встраивать поток в страницу с другого origin (например в React-дашборд
-  // на localhost:5173). Для тега <img> это не обязательно, но пригодится, если
-  // однажды захочется читать кадры из JS/canvas.
+  // Allow embedding the stream in a page from another origin (e.g. a React dashboard
+  // on localhost:5173). For an <img> tag this isn't required, but it will help if
+  // one day we want to read frames from JS/canvas.
   httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
 
   streamClients++;
@@ -282,17 +282,17 @@ static esp_err_t streamHandler(httpd_req_t* req) {
   uint32_t windowBytes  = 0;
 
   while (true) {
-    // Кадр берём под camLock: пока мы держим fb, никто не имеет права сделать
-    // deinit камеры из обработчика /size. Замок отпускаем ДО отправки в сеть —
-    // сеть медленная, и держать на ней камеру незачем.
+    // Take the frame under camLock: while we hold fb, nobody is allowed to
+    // deinit the camera from the /size handler. The lock is released BEFORE sending —
+    // the network is slow, and there's no reason to hold the camera during it.
     xSemaphoreTake(camLock, portMAX_DELAY);
     camera_fb_t* fb = esp_camera_fb_get();
-    // Сенсор GC2145 отдаёт сырой RGB565, готового JPEG у него нет — жмём сами
-    // (тот же frame2jpg, что в уроке 23). Это и есть главный ограничитель к/с.
+    // The GC2145 sensor outputs raw RGB565, it has no ready JPEG — we compress ourselves
+    // (the same frame2jpg as in lesson 23). This is the main limit on fps.
     uint8_t* jpg = nullptr;
     size_t   jpg_len = 0;
     bool ok = fb && frame2jpg(fb, JPEG_QUALITY, &jpg, &jpg_len);
-    if (fb) esp_camera_fb_return(fb);  // сырой кадр драйверу больше не нужен
+    if (fb) esp_camera_fb_return(fb);  // the driver no longer needs the raw frame
     xSemaphoreGive(camLock);
 
     if (!fb) { Serial.println("[STREAM] fb_get NULL"); res = ESP_FAIL; break; }
@@ -309,11 +309,11 @@ static esp_err_t streamHandler(httpd_req_t* req) {
 
     windowFrames++;
     windowBytes += jpg_len;
-    free(jpg);                         // буфер от frame2jpg наш — освободить ОБЯЗАТЕЛЬНО
+    free(jpg);                         // the frame2jpg buffer is ours — freeing it is MANDATORY
 
-    if (res != ESP_OK) break;          // клиент ушёл
+    if (res != ESP_OK) break;          // the client left
 
-    // Раз в секунду пересчитываем к/с и битрейт — их читает /stats.
+    // Once a second recompute fps and bitrate — /stats reads them.
     int64_t now = esp_timer_get_time();
     if (now - windowStart >= 1000000) {
       float sec = (now - windowStart) / 1000000.0f;
@@ -331,7 +331,7 @@ static esp_err_t streamHandler(httpd_req_t* req) {
 }
 
 // ---------------------------------------------------------------------------
-//  Мелкие обработчики: статистика, разрешение, вспышка.
+//  Small handlers: statistics, resolution, flash.
 // ---------------------------------------------------------------------------
 static esp_err_t statsHandler(httpd_req_t* req) {
   char json[192];
@@ -342,7 +342,7 @@ static esp_err_t statsHandler(httpd_req_t* req) {
   return httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
 }
 
-// Достать числовой query-параметр вида ?v=123
+// Fetch a numeric query parameter like ?v=123
 static int queryInt(httpd_req_t* req, const char* key, int def) {
   char query[64];
   if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) return def;
@@ -353,7 +353,7 @@ static int queryInt(httpd_req_t* req, const char* key, int def) {
 
 static esp_err_t sizeHandler(httpd_req_t* req) {
   int v = queryInt(req, "v", (int)FRAMESIZE_QVGA);
-  v = constrain(v, (int)FRAMESIZE_96X96, (int)FRAMESIZE_UXGA);   // GC2145 больше UXGA не умеет
+  v = constrain(v, (int)FRAMESIZE_96X96, (int)FRAMESIZE_UXGA);   // GC2145 can't go beyond UXGA
 
   bool ok = applyFramesize((framesize_t)v);
   Serial.printf("[CAM] framesize -> #%d (%s)\n", v, ok ? "ok" : "fail");
@@ -370,9 +370,9 @@ static esp_err_t flashHandler(httpd_req_t* req) {
 }
 
 // ---------------------------------------------------------------------------
-//  Поднимаем два независимых httpd. Второму серверу НУЖНО поменять не только
-//  server_port, но и ctrl_port: это внутренний UDP-порт управления, и на общем
-//  ctrl_port второй httpd_start() просто не запустится.
+//  Start two independent httpd instances. The second server MUST change not only
+//  server_port but also ctrl_port: that's the internal UDP control port, and with a shared
+//  ctrl_port the second httpd_start() simply won't start.
 // ---------------------------------------------------------------------------
 void startServers() {
   httpd_config_t web = HTTPD_DEFAULT_CONFIG();
@@ -397,7 +397,7 @@ void startServers() {
 
   httpd_config_t stream = HTTPD_DEFAULT_CONFIG();
   stream.server_port = 81;
-  stream.ctrl_port   = 32769;      // ОБЯЗАТЕЛЬНО другой, иначе конфликт с первым
+  stream.ctrl_port   = 32769;      // MUST differ, otherwise it conflicts with the first one
   httpd_uri_t uriStream = { "/stream", HTTP_GET, streamHandler, NULL };
 
   if (httpd_start(&streamServer, &stream) == ESP_OK) {
@@ -410,7 +410,7 @@ void startServers() {
 
 void setup() {
   Serial.begin(115200);
-  delay(1500);      // нативному USB нужно время подняться, иначе первые строки теряются
+  delay(1500);      // native USB needs time to come up, otherwise the first lines are lost
   Serial.println("\n=== Урок 24. MJPEG-поток с ESP32-S3-CAM ===");
 
   statusLed(true);
@@ -430,8 +430,8 @@ void setup() {
   Serial.printf("\n[WiFi] IP: %s (RSSI %d dBm)\n",
                 WiFi.localIP().toString().c_str(), WiFi.RSSI());
 
-  // Wi-Fi спит между пакетами и режет пропускную способность — для видео это
-  // заметно. Отключаем power save: к/с растут, потребление тоже.
+  // Wi-Fi sleeps between packets and cuts throughput — noticeable for video.
+  // Disable power save: fps goes up, and so does power consumption.
   WiFi.setSleep(false);
 
   startServers();
@@ -441,9 +441,9 @@ void setup() {
 }
 
 void loop() {
-  // Здесь ПУСТО, и это главное отличие от урока 23: esp_http_server живёт в
-  // своих собственных задачах FreeRTOS, а не внутри loop(). Поэтому бесконечный
-  // стрим ничего не блокирует, и loop() свободен под что угодно — в уроке 26
-  // мы займём его MQTT-клиентом.
+  // EMPTY here, and that's the main difference from lesson 23: esp_http_server lives in
+  // its own FreeRTOS tasks, not inside loop(). So the endless stream blocks
+  // nothing, and loop() is free for anything — in lesson 26
+  // we'll fill it with an MQTT client.
   delay(1000);
 }
